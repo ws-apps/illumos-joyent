@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright 2015, Joyent, Inc.
+ * Copyright 2016, Joyent, Inc.
  */
 
 #ifndef _LIBDLADM_H
@@ -265,6 +265,8 @@ extern dladm_status_t	dladm_str2pri(char *, mac_priority_level_t *);
 extern const char	*dladm_pri2str(mac_priority_level_t, char *);
 extern dladm_status_t	dladm_str2protect(char *, uint32_t *);
 extern const char	*dladm_protect2str(uint32_t, char *);
+extern dladm_status_t	dladm_str2dynamic(char *, uint32_t *);
+extern const char	*dladm_dynamic2str(uint32_t, char *);
 extern dladm_status_t	dladm_str2ipv4addr(char *, void *);
 extern const char	*dladm_ipv4addr2str(void *, char *);
 extern dladm_status_t	dladm_str2ipv6addr(char *, void *);

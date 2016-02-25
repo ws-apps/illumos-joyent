@@ -21,6 +21,7 @@
 /*
  * Copyright (c) 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2012, Nexenta Systems, Inc. All rights reserved.
+ * Copyright 2016, Joyent, Inc. All rights reserved.
  */
 
 /*
@@ -1502,6 +1503,25 @@ dld_capab_poll(dld_str_t *dsp, void *data, uint_t flags)
 }
 
 static int
+dld_capab_ipcheck(dld_str_t *dsp, void *data, uint_t flags)
+{
+	dld_capab_ipcheck_t	*ipc = data;
+
+	ASSERT(MAC_PERIM_HELD(dsp->ds_mh));
+
+	switch (flags) {
+	case DLD_ENABLE:
+		ipc->ipc_allowed_df = (uintptr_t)mac_protect_check_addr;
+		ipc->ipc_allowed_dh = dsp->ds_mch;
+		return (0);
+	case DLD_DISABLE:
+		return (0);
+	}
+
+	return (ENOTSUP);
+}
+
+static int
 dld_capab_lso(dld_str_t *dsp, void *data, uint_t flags)
 {
 	dld_capab_lso_t		*lso = data;
@@ -1553,7 +1573,7 @@ dld_capab(dld_str_t *dsp, uint_t type, void *data, uint_t flags)
 	 * completes. So we limit the check to DLD_ENABLE case.
 	 */
 	if ((flags == DLD_ENABLE && type != DLD_CAPAB_PERIM) &&
-	    ((dsp->ds_sap != ETHERTYPE_IP ||
+	    (((dsp->ds_sap != ETHERTYPE_IP && dsp->ds_sap != ETHERTYPE_IPV6) ||
 	    !check_mod_above(dsp->ds_rq, "ip")) &&
 	    !check_mod_above(dsp->ds_rq, "vnd"))) {
 		return (ENOTSUP);
@@ -1574,6 +1594,10 @@ dld_capab(dld_str_t *dsp, uint_t type, void *data, uint_t flags)
 
 	case DLD_CAPAB_LSO:
 		err = dld_capab_lso(dsp, data, flags);
+		break;
+
+	case DLD_CAPAB_IPCHECK:
+		err = dld_capab_ipcheck(dsp, data, flags);
 		break;
 
 	default:
@@ -1642,7 +1666,7 @@ proto_capability_advertise(dld_str_t *dsp, mblk_t *mp)
 	 * native media type so we know that there are no transformations that
 	 * would have to happen to the mac header that it receives.
 	 */
-	if ((dsp->ds_sap == ETHERTYPE_IP &&
+	if (((dsp->ds_sap == ETHERTYPE_IP || dsp->ds_sap == ETHERTYPE_IPV6) &&
 	    check_mod_above(dsp->ds_rq, "ip")) ||
 	    (check_mod_above(dsp->ds_rq, "vnd") &&
 	    dsp->ds_mip->mi_media == dsp->ds_mip->mi_nativemedia)) {
