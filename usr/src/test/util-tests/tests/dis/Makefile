@@ -26,37 +26,58 @@ SPARC_TESTS = \
 
 I386_TESTS =		\
 	32.adx 		\
+	32.avx		\
+	32.avx2		\
 	32.aes 		\
 	32.bmi1 	\
 	32.bmi2 	\
+	32.f16c 	\
 	32.fma-pd 	\
 	32.fma-ps 	\
 	32.fma-sd 	\
 	32.fma-ss 	\
 	32.lzcnt 	\
+	32.movbe	\
+	32.pclmulqdq	\
 	32.popcnt 	\
+	32.sha		\
+	32.sse-3	\
+	32.sse-4.1 	\
 	32.sse-4.2 	\
 	32.ssse3 	\
 	32.xsave 	\
+	64.avx		\
+	64.avx2		\
 	64.adx 		\
 	64.aes 		\
 	64.bmi1 	\
 	64.bmi2 	\
 	64.ept 		\
+	64.f16c 	\
 	64.fma-pd 	\
 	64.fma-ps 	\
 	64.fma-sd 	\
 	64.fma-ss 	\
 	64.lzcnt 	\
+	64.movbe	\
+	64.pclmulqdq	\
 	64.popcnt 	\
 	64.random 	\
+	64.sha		\
+	64.sse-3	\
+	64.sse-4.1 	\
 	64.sse-4.2 	\
 	64.ssse3 	\
 	64.vmx 		\
 	64.xsave 	\
+	tst.cpuid	\
+	tst.fence	\
+	tst.msr		\
 	tst.mwait 	\
 	tst.random	\
 	tst.smap	\
+	tst.sep		\
+	tst.tsc		\
 	tst.vmx
 
 I386_FILES = $(I386_TESTS:%=%.s) $(I386_TESTS:%=%.out)
