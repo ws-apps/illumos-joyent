@@ -59,7 +59,7 @@
 	    opt="ro" type="lofs" />
 	<global_mount special="/etc/zones/%z.xml"
 	    directory="/native/etc/zones/%z.xml" opt="ro" type="lofs" />
-	<global_mount special="/etc/zonecontrol/%z" directory="/native/.zonecontrol"
+	<global_mount special="/var/zonecontrol/%z" directory="/native/.zonecontrol"
 	    opt="ro" type="lofs" />
 
 	<!-- Local filesystems to mount when booting the zone -->
