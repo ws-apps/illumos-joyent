@@ -101,7 +101,7 @@ extern "C" {
 #define	B_STORE_ARGS		137
 #define	B_GETPID		138
 #define	B_JUMP_TO_LINUX		139
-#define	B_SET_THUNK_PID		140
+/* formerly B_SET_THUNK_PID	140 */
 #define	B_EXIT_AS_SIG		141
 /* formerly B_HELPER_WAITID	142 */
 #define	B_HELPER_CLONE		143
@@ -109,7 +109,7 @@ extern "C" {
 #define	B_HELPER_SIGQUEUE	145
 #define	B_HELPER_TGSIGQUEUE	146
 #define	B_SET_NATIVE_STACK	147
-#define	B_SIGEV_THREAD_ID	148
+/* formerly B_SIGEV_THREAD_ID	148 */
 #define	B_OVERRIDE_KERN_VER	149
 #define	B_PTRACE_SIG_RETURN	150
 #define	B_GET_PERSONALITY	151
@@ -523,13 +523,6 @@ struct lx_lwp_data {
 	lx_stack_mode_t	br_stack_mode;
 	uintptr_t br_ntv_stack;
 	uintptr_t br_ntv_stack_current;
-
-	/*
-	 * If this pid is set, we return it with getpid().  This allows the
-	 * thunking server to interpose on the pid returned to the Linux
-	 * syslog software.
-	 */
-	pid_t	br_lx_thunk_pid;
 
 	/*
 	 * If strict mode is enabled (via LX_STRICT in the environment), any

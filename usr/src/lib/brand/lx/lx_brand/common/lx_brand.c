@@ -1151,8 +1151,8 @@ static lx_syscall_handler_t lx_handlers[] = {
 	lx_statfs,			/* 137: statfs */
 	lx_fstatfs,			/* 138: fstatfs */
 	lx_sysfs,			/* 139: sysfs */
-	lx_getpriority,			/* 140: getpriority */
-	lx_setpriority,			/* 141: setpriority */
+	NULL,				/* 140: getpriority */
+	NULL,				/* 141: setpriority */
 	NULL,				/* 142: sched_setparam */
 	NULL,				/* 143: sched_getparam */
 	NULL,				/* 144: sched_setscheduler */
@@ -1233,7 +1233,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 219: restart_syscall */
 	lx_semtimedop,			/* 220: semtimedop */
 	NULL,				/* 221: fadvise64 */
-	lx_timer_create,		/* 222: timer_create */
+	NULL,				/* 222: timer_create */
 	lx_timer_settime,		/* 223: timer_settime */
 	lx_timer_gettime,		/* 224: timer_gettime */
 	lx_timer_getoverrun,		/* 225: timer_getoverrun */
@@ -1438,8 +1438,8 @@ static lx_syscall_handler_t lx_handlers[] = {
 	lx_ftruncate,			/*  93: ftruncate */
 	NULL,				/*  94: fchmod */
 	NULL,				/*  95: fchown16 */
-	lx_getpriority,			/*  96: getpriority */
-	lx_setpriority,			/*  97: setpriority */
+	NULL,				/*  96: getpriority */
+	NULL,				/*  97: setpriority */
 	NULL,				/*  98: profil */
 	lx_statfs,			/*  99: statfs */
 	lx_fstatfs,			/* 100: fstatfs */
@@ -1601,7 +1601,7 @@ static lx_syscall_handler_t lx_handlers[] = {
 	NULL,				/* 256: epoll_wait */
 	NULL,				/* 257: remap_file_pages */
 	NULL,				/* 258: set_tid_address */
-	lx_timer_create,		/* 259: timer_create */
+	NULL,				/* 259: timer_create */
 	lx_timer_settime,		/* 260: timer_settime */
 	lx_timer_gettime,		/* 261: timer_gettime */
 	lx_timer_getoverrun,		/* 262: timer_getoverrun */

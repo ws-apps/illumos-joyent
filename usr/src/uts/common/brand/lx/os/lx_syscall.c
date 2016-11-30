@@ -615,8 +615,8 @@ lx_sysent_t lx_sysent32[] = {
 	{"ftruncate",	NULL,			0,		2}, /* 93 */
 	{"fchmod",	lx_fchmod,		0,		2}, /* 94 */
 	{"fchown16",	lx_fchown16,		0,		3}, /* 95 */
-	{"getpriority",	NULL,			0,		2}, /* 96 */
-	{"setpriority",	NULL,			0,		3}, /* 97 */
+	{"getpriority",	lx_getpriority,		0,		2}, /* 96 */
+	{"setpriority",	lx_setpriority,		0,		3}, /* 97 */
 	{"profil",	NULL,			NOSYS_NO_EQUIV,	0}, /* 98 */
 	{"statfs",	NULL,			0,		2}, /* 99 */
 	{"fstatfs",	NULL,			0,		2}, /* 100 */
@@ -778,7 +778,7 @@ lx_sysent_t lx_sysent32[] = {
 	{"epoll_wait",	lx_epoll_wait,		0,		4}, /* 256 */
 	{"remap_file_pages", NULL,		NOSYS_NO_EQUIV,	0}, /* 257 */
 	{"set_tid_address", lx_set_tid_address,	0,		1}, /* 258 */
-	{"timer_create", NULL,			0,		3}, /* 259 */
+	{"timer_create", lx_timer_create,	0,		3}, /* 259 */
 	{"timer_settime", NULL,			0,		4}, /* 260 */
 	{"timer_gettime", NULL,			0,		2}, /* 261 */
 	{"timer_getoverrun", NULL,		0,		1}, /* 262 */
@@ -1030,8 +1030,8 @@ lx_sysent_t lx_sysent64[] = {
 	{"statfs",	NULL,			0,		2}, /* 137 */
 	{"fstatfs",	NULL,			0,		2}, /* 138 */
 	{"sysfs",	NULL,			0,		3}, /* 139 */
-	{"getpriority",	NULL,			0,		2}, /* 140 */
-	{"setpriority",	NULL,			0,		3}, /* 141 */
+	{"getpriority",	lx_getpriority,		0,		2}, /* 140 */
+	{"setpriority",	lx_setpriority,		0,		3}, /* 141 */
 	{"sched_setparam", lx_sched_setparam,	0,		2}, /* 142 */
 	{"sched_getparam", lx_sched_getparam,	0,		2}, /* 143 */
 	{"sched_setscheduler", lx_sched_setscheduler, 0,	3}, /* 144 */
@@ -1112,7 +1112,7 @@ lx_sysent_t lx_sysent64[] = {
 	{"restart_syscall", NULL,		NOSYS_NULL,	0}, /* 219 */
 	{"semtimedop",	NULL,			0,		4}, /* 220 */
 	{"fadvise64",	lx_fadvise64,		0,		4}, /* 221 */
-	{"timer_create", NULL,			0,		3}, /* 222 */
+	{"timer_create", lx_timer_create,	0,		3}, /* 222 */
 	{"timer_settime", NULL,			0,		4}, /* 223 */
 	{"timer_gettime", NULL,			0,		2}, /* 224 */
 	{"timer_getoverrun", NULL,		0,		1}, /* 225 */
