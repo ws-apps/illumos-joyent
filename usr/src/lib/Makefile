@@ -279,7 +279,8 @@ SUBDIRS +=				\
 
 i386_SUBDIRS=		\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_SUBDIRS=		\
 	efcode		\
@@ -512,7 +513,8 @@ HDRSUBDIRS=				\
 
 i386_HDRSUBDIRS=	\
 	libfdisk	\
-	libsaveargs
+	libsaveargs	\
+	libvmmapi
 
 sparc_HDRSUBDIRS=	\
 	libds		\
