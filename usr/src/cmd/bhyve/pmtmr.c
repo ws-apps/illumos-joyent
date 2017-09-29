@@ -160,10 +160,14 @@ pmtmr_init(void)
 static uint32_t
 pmtmr_val(void)
 {
+#ifdef	__FreeBSD__
 	struct timespec	tsnew;
+#endif
 	uint64_t	pmtmr_tsc_new;
 	uint64_t	pmtmr_new;
+#ifdef	__FreeBSD__
 	int		error;
+#endif
 
 	pthread_once(&pmtmr_once, pmtmr_init);
 

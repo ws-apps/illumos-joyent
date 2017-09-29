@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <strings.h>
 #include <unistd.h>
+#include <stdlib.h>
 
 #include <bhyve.h>
 
@@ -320,7 +321,7 @@ doio(void)
 int
 main(int argc, char **argv)
 {
-	char *vmname;
+	char *vmname = NULL;
 
 	pname = basename(argv[0]);
 

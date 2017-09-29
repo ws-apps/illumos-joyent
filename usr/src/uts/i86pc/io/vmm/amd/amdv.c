@@ -170,6 +170,7 @@ struct vmm_ops vmm_ops_amd = {
 	amdv_setcap
 };
 
+#ifdef	__FreeBSD__
 static int
 amd_iommu_init(void)
 {
@@ -252,7 +253,6 @@ amd_iommu_invalidate_tlb(void *domain)
 	printf("amd_iommu_invalidate_tlb: not implemented\n");
 }
 
-#ifdef	__FreeBSD__
 struct iommu_ops iommu_ops_amd = {
 	amd_iommu_init,
 	amd_iommu_cleanup,

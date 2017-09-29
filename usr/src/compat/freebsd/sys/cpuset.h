@@ -33,7 +33,7 @@ typedef int cpuset_t;
 
 #define	CPUSET(cpu)			(1UL << (cpu))
 
-#define	CPU_SET_ATOMIC(cpu, set)	atomic_set_int((set), CPUSET(cpu))
+#define	CPU_SET_ATOMIC(cpu, set)	atomic_set_int((u_int *)(set), CPUSET(cpu))
 #endif
 
 #endif	/* _COMPAT_FREEBSD_SYS_CPUSET_H_ */

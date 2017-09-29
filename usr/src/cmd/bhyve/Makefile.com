@@ -60,6 +60,8 @@ CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd $(CPPFLAGS.master) \
 		-I$(SRC)/lib/libdladm/common
 LDLIBS +=	-lsocket -lnsl -ldlpi -ldladm -lkstat -lmd -luuid -lvmmapi
 
+GENSETDEFS=	true
+
 POST_PROCESS += ; $(GENSETDEFS) $@
 
 all: $(PROG)

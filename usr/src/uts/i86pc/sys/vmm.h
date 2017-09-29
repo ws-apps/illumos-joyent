@@ -230,7 +230,7 @@ int vcpu_set_state(struct vm *vm, int vcpu, enum vcpu_state state,
     bool from_idle);
 enum vcpu_state vcpu_get_state(struct vm *vm, int vcpu, int *hostcpu);
 
-static int __inline
+static __inline int
 vcpu_is_running(struct vm *vm, int vcpu, int *hostcpu)
 {
 	return (vcpu_get_state(vm, vcpu, hostcpu) == VCPU_RUNNING);

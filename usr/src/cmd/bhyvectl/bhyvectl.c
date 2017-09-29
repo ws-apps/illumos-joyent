@@ -394,7 +394,7 @@ enum {
 int
 main(int argc, char *argv[])
 {
-	char *vmname;
+	char *vmname = NULL;
 	int error, ch, vcpu;
 	vm_paddr_t gpa;
 	size_t len;

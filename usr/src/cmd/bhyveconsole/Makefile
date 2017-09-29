@@ -10,6 +10,8 @@
 
 include ../Makefile.cmd
 
+PROG=	bhyveconsole
+
 SUBDIRS= $(MACH)
 
 all	:=	TARGET = all

@@ -87,8 +87,10 @@ vmm_get_host_gdtrbase(void)
 #endif
 }
 
+#ifdef	__FreeBSD__
 struct pcpu;
 extern struct pcpu __pcpu[];
+#endif
 
 static __inline uint64_t
 vmm_get_host_gsbase(void)

@@ -1000,3 +1000,11 @@ usr/lib/sparcv9/libficl-sys.so		sparc
 usr/lib/llib-lficl-sys
 usr/lib/llib-lficl-sys.ln
 usr/lib/libficl-sys.so
+#
+# private bhyve header files
+#
+usr/include/bhyve.h
+usr/include/vmmapi.h
+usr/platform/i86pc/include/sys/vmm.h
+usr/platform/i86pc/include/sys/vmm_impl.h
+usr/platform/i86pc/include/sys/vmm_instruction_emul.h

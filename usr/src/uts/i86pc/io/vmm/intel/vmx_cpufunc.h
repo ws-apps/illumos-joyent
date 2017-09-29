@@ -167,7 +167,7 @@ vmread(uint64_t r, uint64_t *addr)
 	return (error);
 }
 
-static void __inline
+static __inline void
 VMCLEAR(struct vmcs *vmcs)
 {
 	int err;
@@ -179,7 +179,7 @@ VMCLEAR(struct vmcs *vmcs)
 	critical_exit();
 }
 
-static void __inline
+static __inline void
 VMPTRLD(struct vmcs *vmcs)
 {
 	int err;
@@ -203,7 +203,7 @@ struct invvpid_desc {
 };
 CTASSERT(sizeof(struct invvpid_desc) == 16);
 
-static void __inline
+static __inline void
 invvpid(uint64_t type, struct invvpid_desc desc)
 {
 	int error;
@@ -226,7 +226,7 @@ struct invept_desc {
 };
 CTASSERT(sizeof(struct invept_desc) == 16);
 
-static void __inline
+static __inline void
 invept(uint64_t type, struct invept_desc desc)
 {
 	int error;

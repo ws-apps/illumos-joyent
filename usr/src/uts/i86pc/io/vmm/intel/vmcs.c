@@ -362,7 +362,10 @@ vmcs_set_defaults(struct vmcs *vmcs,
 {
 	int error, codesel, datasel, tsssel;
 	u_long cr0, cr4, efer;
-	uint64_t eptp, pat, fsbase, idtrbase;
+	uint64_t eptp, pat, idtrbase;
+#ifdef	__FreeBSD__
+	uint64_t fsbase;
+#endif
 	uint32_t exc_bitmap;
 
 	codesel = vmm_get_host_codesel();

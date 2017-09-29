@@ -236,6 +236,7 @@ vioapic_pulse_irq(struct vm *vm, int irq)
  * Reset the vlapic's trigger-mode register to reflect the ioapic pin
  * configuration.
  */
+#if 0	/* XXX */
 static void
 vioapic_update_tmr(struct vm *vm, int vcpuid, void *arg)
 {
@@ -275,6 +276,7 @@ vioapic_update_tmr(struct vm *vm, int vcpuid, void *arg)
 	}
 	VIOAPIC_UNLOCK(vioapic);
 }
+#endif
 
 static uint32_t
 vioapic_read(struct vioapic *vioapic, int vcpuid, uint32_t addr)
@@ -317,7 +319,9 @@ vioapic_write(struct vioapic *vioapic, int vcpuid, uint32_t addr, uint32_t data)
 	uint64_t data64, mask64;
 	uint64_t last, changed;
 	int regnum, pin, lshift;
+#if 0	/* XXX */
 	cpuset_t allvcpus;
+#endif
 
 	regnum = addr & 0xff;
 	switch (regnum) {

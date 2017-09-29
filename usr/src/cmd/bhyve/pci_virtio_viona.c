@@ -287,6 +287,8 @@ pci_viona_tx_thread(void *param)
 		sc->vsc_tx_kick_lock_held = B_FALSE;
 	}
 	pthread_mutex_unlock(&sc->tx_mtx);
+
+	return (NULL);
 }
 
 static void
@@ -345,8 +347,10 @@ static int
 pci_viona_viona_init(struct vmctx *ctx, struct pci_viona_softc *sc)
 {
 	vioc_create_t		vna_create;
+#if notyet
 	char			devname[MAXNAMELEN];
 	int			ctlfd;
+#endif
 	int			error;
 
 	sc->vsc_vnafd = open("/devices/pseudo/viona@0:ctl", O_RDWR | O_EXCL);
