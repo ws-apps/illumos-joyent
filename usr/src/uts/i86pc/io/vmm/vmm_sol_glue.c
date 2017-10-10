@@ -638,13 +638,21 @@ fpu_save_area_cleanup(void)
 struct savefpu *
 fpu_save_area_alloc(void)
 {
-	return (vmem_alloc(fpu_save_area_arena, sizeof (struct savefpu),
-			   VM_SLEEP));
+	struct savefpu *fsa = vmem_alloc(fpu_save_area_arena,
+	    sizeof (struct savefpu), VM_SLEEP);
+
+	bzero(fsa, sizeof (struct savefpu));
+	fsa->fsa_fp_ctx.fpu_regs.kfpu_u.kfpu_generic =
+	    kmem_cache_alloc(fpsave_cachep, KM_SLEEP);
+
+	return (fsa);
 }
 
 void
 fpu_save_area_free(struct savefpu *fsa)
 {
+	kmem_cache_free(fpsave_cachep,
+	    fsa->fsa_fp_ctx.fpu_regs.kfpu_u.kfpu_generic);
 	vmem_free(fpu_save_area_arena, fsa, sizeof (struct savefpu));
 }
 
