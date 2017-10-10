@@ -120,12 +120,14 @@ vlapic_dfr_write_handler(struct vlapic *vlapic)
 	lapic->dfr &= APIC_DFR_MODEL_MASK;
 	lapic->dfr |= APIC_DFR_RESERVED;
 
-	if ((lapic->dfr & APIC_DFR_MODEL_MASK) == APIC_DFR_MODEL_FLAT)
+	if ((lapic->dfr & APIC_DFR_MODEL_MASK) == APIC_DFR_MODEL_FLAT) {
 		VLAPIC_CTR0(vlapic, "vlapic DFR in Flat Model");
-	else if ((lapic->dfr & APIC_DFR_MODEL_MASK) == APIC_DFR_MODEL_CLUSTER)
+	} else if ((lapic->dfr & APIC_DFR_MODEL_MASK) ==
+	    APIC_DFR_MODEL_CLUSTER) {
 		VLAPIC_CTR0(vlapic, "vlapic DFR in Cluster Model");
-	else
+	} else {
 		VLAPIC_CTR1(vlapic, "DFR in Unknown Model %#x", lapic->dfr);
+	}
 }
 
 void

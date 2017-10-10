@@ -184,7 +184,9 @@ msr_bitmap_change_access(char *bitmap, u_int msr, int access)
 static uint64_t misc_enable;
 static uint64_t platform_info;
 static uint64_t turbo_ratio_limit;
+#ifdef	__FreeBSD__
 static uint64_t host_msrs[GUEST_MSR_NUM];
+#endif
 
 static bool
 nehalem_cpu(void)

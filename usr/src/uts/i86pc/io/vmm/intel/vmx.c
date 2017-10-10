@@ -161,7 +161,9 @@ static int cap_halt_exit;
 static int cap_pause_exit;
 static int cap_unrestricted_guest;
 static int cap_monitor_trap;
+#if notyet
 static int cap_invpcid;
+#endif
 
 static int virtual_interrupt_delivery;
 SYSCTL_INT(_hw_vmm_vmx, OID_AUTO, virtual_interrupt_delivery, CTLFLAG_RD,
@@ -190,7 +192,9 @@ SYSCTL_UINT(_hw_vmm_vmx, OID_AUTO, vpid_alloc_failed, CTLFLAG_RD,
 static int vmx_getdesc(void *arg, int vcpu, int reg, struct seg_desc *desc);
 static int vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval);
 static int vmxctx_setreg(struct vmxctx *vmxctx, int reg, uint64_t val);
+#ifdef	__FreeBSD__
 static void vmx_inject_pir(struct vlapic *vlapic);
+#endif
 
 #ifdef KTR
 static const char *
@@ -382,13 +386,14 @@ vmx_setjmp_trace(struct vmx *vmx, int vcpu, struct vmxctx *vmxctx, int rc)
 }
 #endif
 #else
-static void __inline
+static __inline void
 vmx_setjmp_trace(struct vmx *vmx, int vcpu, struct vmxctx *vmxctx, int rc)
 {
 	return;
 }
 #endif	/* KTR */
 
+#if notyet
 static int
 vmx_allow_x2apic_msrs(struct vmx *vmx)
 {
@@ -436,6 +441,7 @@ vmx_allow_x2apic_msrs(struct vmx *vmx)
 
 	return (error);
 }
+#endif
 
 u_long
 vmx_fix_cr0(u_long cr0)
@@ -1029,8 +1035,10 @@ vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu)
 {
 	struct vmxstate *vmxstate;
 	struct invvpid_desc invvpid_desc = { 0 };
+#if notyet
 #ifndef	__FreeBSD__
 	desctbr_t idtr, gdtr;
+#endif
 #endif
 
 	vmxstate = &vmx->state[vcpu];
@@ -1088,7 +1096,7 @@ vm_exit_update_rip(struct vm_exit *vmexit)
  */
 CTASSERT((PROCBASED_CTLS_ONE_SETTING & PROCBASED_INT_WINDOW_EXITING) != 0);
 
-static void __inline
+static __inline void
 vmx_set_int_window_exiting(struct vmx *vmx, int vcpu)
 {
 
@@ -1099,7 +1107,7 @@ vmx_set_int_window_exiting(struct vmx *vmx, int vcpu)
 	}
 }
 
-static void __inline
+static __inline void
 vmx_clear_int_window_exiting(struct vmx *vmx, int vcpu)
 {
 
@@ -1115,7 +1123,7 @@ vmx_clear_int_window_exiting(struct vmx *vmx, int vcpu)
 	VCPU_CTR0(vmx->vm, vcpu, "Disabling interrupt window exiting");
 }
 
-static void __inline
+static __inline void
 vmx_set_nmi_window_exiting(struct vmx *vmx, int vcpu)
 {
 
@@ -1126,7 +1134,7 @@ vmx_set_nmi_window_exiting(struct vmx *vmx, int vcpu)
 	}
 }
 
-static void __inline
+static __inline void
 vmx_clear_nmi_window_exiting(struct vmx *vmx, int vcpu)
 {
 
@@ -1407,6 +1415,7 @@ vmx_restore_nmi_blocking(struct vmx *vmx, int vcpuid)
 	vmcs_write(VMCS_GUEST_INTERRUPTIBILITY, gi);
 }
 
+#if notyet
 static void
 vmx_clear_nmi_blocking(struct vmx *vmx, int vcpuid)
 {
@@ -1417,6 +1426,7 @@ vmx_clear_nmi_blocking(struct vmx *vmx, int vcpuid)
 	gi &= ~VMCS_INTERRUPTIBILITY_NMI_BLOCKING;
 	vmcs_write(VMCS_GUEST_INTERRUPTIBILITY, gi);
 }
+#endif
 
 static uint64_t
 vmx_get_guest_reg(struct vmx *vmx, int vcpu, int ident)
@@ -1754,6 +1764,7 @@ vmexit_inst_emul(struct vm_exit *vmexit, uint64_t gpa, uint64_t gla)
 	vie_init(&vmexit->u.inst_emul.vie, NULL, 0);
 }
 
+#if notyet
 static int
 ept_fault_type(uint64_t ept_qual)
 {
@@ -1768,6 +1779,7 @@ ept_fault_type(uint64_t ept_qual)
 
 	return (fault_type);
 }
+#endif
 
 static boolean_t
 ept_emulation_fault(uint64_t ept_qual)
@@ -1845,7 +1857,10 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 	struct vmxctx *vmxctx;
 	struct vm_inout_str *vis;
 	uint32_t eax, ecx, edx, idtvec_info, intr_info, inst_info;
-	uint64_t qual, gla, gpa, cr3;
+	uint64_t qual, gpa;
+#if notyet
+	uint64_t gla, cr3;
+#endif
 	bool retu;
 
 	CTASSERT((PINBASED_CTLS_ONE_SETTING & PINBASED_VIRTUAL_NMI) != 0);
@@ -2019,6 +2034,8 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 		 *
 		 * See "Resuming Guest Software after Handling an Exception".
 		 */
+		/* XXX: properly initialize idtvec_info */
+		idtvec_info = 0;
 		if ((idtvec_info & VMCS_IDT_VEC_VALID) == 0 &&
 		    (intr_info & 0xff) != IDT_DF &&
 		    (intr_info & EXIT_QUAL_NMIUDTI) != 0)
@@ -2087,7 +2104,10 @@ vmx_exit_process(struct vmx *vmx, int vcpu, struct vm_exit *vmexit)
 static int
 vmx_run(void *arg, int vcpu, register_t rip)
 {
-	int error, vie, rc, handled, astpending;
+#if notyet
+	int error;
+#endif
+	int vie, rc, handled, astpending;
 	uint32_t exit_reason;
 	struct vmx *vmx;
 	struct vm *vm;
@@ -2687,6 +2707,7 @@ vmx_post_intr(struct vlapic *vlapic, int hostcpu)
  * Transfer the pending interrupts in the PIR descriptor to the IRR
  * in the virtual APIC page.
  */
+#ifdef	__FreeBSD__
 static void
 vmx_inject_pir(struct vlapic *vlapic)
 {
@@ -2776,6 +2797,7 @@ vmx_inject_pir(struct vlapic *vlapic)
 		}
 	}
 }
+#endif
 
 static struct vlapic *
 vmx_vlapic_init(void *arg, int vcpuid)

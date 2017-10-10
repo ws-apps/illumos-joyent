@@ -8,8 +8,8 @@
 # Pluribus Networks Inc is prohibited, and any such unauthorized removal
 # or alteration will be a violation of federal law.
 
-MAKEVARS = CW_NO_SHADOW=true __GNUC=
+#MAKEVARS = CW_NO_SHADOW=true __GNUC=
 
 include $(SRC)/Makefile.master
-$(BUILD64)SUBDIRS += 	$(MACH64)
+$(BUILD64)SUBDIRS +=	$(MACH64)
 include ../../../Makefile.subdirs

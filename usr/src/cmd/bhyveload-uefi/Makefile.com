@@ -19,7 +19,7 @@ include ../../Makefile.cmd
 
 CFLAGS +=	$(CCVERBOSE)
 CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd $(CPPFLAGS.master) \
-	        -I$(ROOT)/usr/platform/i86pc/include
+		-I$(ROOT)/usr/platform/i86pc/include
 LDLIBS +=	-lvmmapi
 
 all: $(PROG)
@@ -44,4 +44,3 @@ include ../../Makefile.targ
 %.o: $(CONTRIB)/freebsd/lib/libutil/%.c
 	$(COMPILE.c) $<
 	$(POST_PROCESS_O)
-
