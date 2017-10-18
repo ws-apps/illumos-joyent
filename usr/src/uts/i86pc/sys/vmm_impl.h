@@ -23,7 +23,7 @@
 #define	VMM_DRIVER_NAME		"vmm"
 
 #define	VMM_CTL_MINOR_NODE	"ctl"
-#define	VMM_CTL_MINOR_NAME	VMM_DRIVER_NAME VMM_CTL_NODE
+#define	VMM_CTL_MINOR_NAME	VMM_DRIVER_NAME VMM_CTL_MINOR_NODE
 #define	VMM_CTL_MINOR		0
 
 #define	VMM_IOC_BASE		(('V' << 16) | ('M' << 8))

@@ -41,7 +41,7 @@
 
 #ifdef _KERNEL
 void	vmmdev_init(void);
-int	vmmdev_cleanup(void);
+void	vmmdev_cleanup(void);
 #endif
 
 struct vm_memory_segment {

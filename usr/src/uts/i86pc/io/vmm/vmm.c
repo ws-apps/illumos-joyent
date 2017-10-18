@@ -231,10 +231,6 @@ vmm_init(void)
 {
 	int error;
 
-#ifndef	__FreeBSD__
-	vmm_sol_glue_init();
-#endif
-
 	vmm_host_state_init();
 #ifdef	__FreeBSD__
 	vmm_ipi_init();
@@ -243,7 +239,7 @@ vmm_init(void)
 	error = vmm_mem_init();
 	if (error)
 		return (error);
-	
+
 	if (vmm_is_intel())
 		ops = &vmm_ops_intel;
 	else if (vmm_is_amd())
@@ -272,9 +268,6 @@ vmm_handler(module_t mod, int what, void *arg)
 	case MOD_UNLOAD:
 		error = vmmdev_cleanup();
 		if (error == 0) {
-#ifndef	__FreeBSD__
-			vmm_sol_glue_cleanup();
-#endif
 			iommu_cleanup();
 			vmm_ipi_cleanup();
 			error = VMM_CLEANUP();
@@ -331,9 +324,7 @@ vmm_mod_unload()
 {
 	int	error;
 
-	error = vmmdev_cleanup();
-	if (error)
-		return (error);
+	vmmdev_cleanup();
 	error = VMM_CLEANUP();
 	if (error)
 		return (error);
