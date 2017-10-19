@@ -9,7 +9,7 @@
  * or alteration will be a violation of federal law.
  */
 #ifndef _VMM_IMPL_H_
-#define _VMM_IMPL_H_
+#define	_VMM_IMPL_H_
 
 #include <sys/mutex.h>
 #include <sys/queue.h>
