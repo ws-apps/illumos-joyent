@@ -13,16 +13,7 @@
  * Copyright 2017 Joyent, Inc.
  */
 
-#ifndef _COMPAT_FREEBSD_X86_SEGMENTS_H
-#define	_COMPAT_FREEBSD_X86_SEGMENTS_H
+#ifndef _COMPAT_FREEBSD_AMD64_MACHINE_IODEV_H
+#define	_COMPAT_FREEBSD_AMD64_MACHINE_IODEV_H
 
-#if defined(_COMPAT_FREEBSD_AMD64_MACHINE_VMM_H_) || defined(_KERNEL)
-#define	IDT_UD		6	/* #UD: Undefined/Invalid Opcode */
-#define	IDT_SS		12	/* #SS: Stack Segment Fault */
-#define	IDT_GP		13	/* #GP: General Protection Fault */
-#define	IDT_AC		17	/* #AC: Alignment Check */
-#else
-#include_next <x86/segments.h>
-#endif
-
-#endif /* _COMPAT_FREEBSD_X86_SEGMENTS_H */
+#endif /* _COMPAT_FREEBSD_AMD64_MACHINE_IODEV_H */
