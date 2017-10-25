@@ -33,11 +33,11 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/sys/amd64/vmm/io/vlapic.c 273375 2014-10-21 07:10:43Z neel $
+ * $FreeBSD$
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/sys/amd64/vmm/io/vlapic.c 273375 2014-10-21 07:10:43Z neel $");
+__FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/lock.h>
@@ -55,7 +55,6 @@ __FBSDID("$FreeBSD: head/sys/amd64/vmm/io/vlapic.c 273375 2014-10-21 07:10:43Z n
 
 #include <machine/vmm.h>
 
-#include "vmm_ipi.h"
 #include "vmm_lapic.h"
 #include "vmm_ktr.h"
 #include "vmm_stat.h"
@@ -80,7 +79,12 @@ __FBSDID("$FreeBSD: head/sys/amd64/vmm/io/vlapic.c 273375 2014-10-21 07:10:43Z n
 #define	VLAPIC_TIMER_UNLOCK(vlapic)	mtx_unlock_spin(&((vlapic)->timer_mtx))
 #define	VLAPIC_TIMER_LOCKED(vlapic)	mtx_owned(&((vlapic)->timer_mtx))
 
-#define VLAPIC_BUS_FREQ	tsc_freq
+/*
+ * APIC timer frequency:
+ * - arbitrary but chosen to be in the ballpark of contemporary hardware.
+ * - power-of-two to avoid loss of precision when converted to a bintime.
+ */
+#define VLAPIC_BUS_FREQ		(128 * 1024 * 1024)
 
 static __inline uint32_t
 vlapic_get_id(struct vlapic *vlapic)
@@ -120,14 +124,12 @@ vlapic_dfr_write_handler(struct vlapic *vlapic)
 	lapic->dfr &= APIC_DFR_MODEL_MASK;
 	lapic->dfr |= APIC_DFR_RESERVED;
 
-	if ((lapic->dfr & APIC_DFR_MODEL_MASK) == APIC_DFR_MODEL_FLAT) {
+	if ((lapic->dfr & APIC_DFR_MODEL_MASK) == APIC_DFR_MODEL_FLAT)
 		VLAPIC_CTR0(vlapic, "vlapic DFR in Flat Model");
-	} else if ((lapic->dfr & APIC_DFR_MODEL_MASK) ==
-	    APIC_DFR_MODEL_CLUSTER) {
+	else if ((lapic->dfr & APIC_DFR_MODEL_MASK) == APIC_DFR_MODEL_CLUSTER)
 		VLAPIC_CTR0(vlapic, "vlapic DFR in Cluster Model");
-	} else {
+	else
 		VLAPIC_CTR1(vlapic, "DFR in Unknown Model %#x", lapic->dfr);
-	}
 }
 
 void
@@ -258,7 +260,6 @@ vlapic_dcr_write_handler(struct vlapic *vlapic)
 
 	VLAPIC_TIMER_UNLOCK(vlapic);
 }
-
 
 void
 vlapic_esr_write_handler(struct vlapic *vlapic)
@@ -566,6 +567,8 @@ vlapic_update_ppr(struct vlapic *vlapic)
 	VLAPIC_CTR1(vlapic, "vlapic_update_ppr 0x%02x", ppr);
 }
 
+static VMM_STAT(VLAPIC_GRATUITOUS_EOI, "EOI without any in-service interrupt");
+
 static void
 vlapic_process_eoi(struct vlapic *vlapic)
 {
@@ -576,11 +579,7 @@ vlapic_process_eoi(struct vlapic *vlapic)
 	isrptr = &lapic->isr0;
 	tmrptr = &lapic->tmr0;
 
-	/*
-	 * The x86 architecture reserves the the first 32 vectors for use
-	 * by the processor.
-	 */
-	for (i = 7; i > 0; i--) {
+	for (i = 7; i >= 0; i--) {
 		idx = i * 4;
 		bitpos = fls(isrptr[idx]);
 		if (bitpos-- != 0) {
@@ -589,17 +588,21 @@ vlapic_process_eoi(struct vlapic *vlapic)
 				      vlapic->isrvec_stk_top);
 			}
 			isrptr[idx] &= ~(1 << bitpos);
+			vector = i * 32 + bitpos;
+			VCPU_CTR1(vlapic->vm, vlapic->vcpuid, "EOI vector %d",
+			    vector);
 			VLAPIC_CTR_ISR(vlapic, "vlapic_process_eoi");
 			vlapic->isrvec_stk_top--;
 			vlapic_update_ppr(vlapic);
 			if ((tmrptr[idx] & (1 << bitpos)) != 0) {
-				vector = i * 32 + bitpos;
 				vioapic_process_eoi(vlapic->vm, vlapic->vcpuid,
 				    vector);
 			}
 			return;
 		}
 	}
+	VCPU_CTR0(vlapic->vm, vlapic->vcpuid, "Gratuitous EOI");
+	vmm_stat_incr(vlapic->vm, vlapic->vcpuid, VLAPIC_GRATUITOUS_EOI, 1);
 }
 
 static __inline int
@@ -865,7 +868,7 @@ vlapic_calcdest(struct vm *vm, cpuset_t *dmask, uint32_t dest, bool phys,
 	} else {
 		/*
 		 * In the "Flat Model" the MDA is interpreted as an 8-bit wide
-		 * bitmask. This model is only avilable in the xAPIC mode.
+		 * bitmask. This model is only available in the xAPIC mode.
 		 */
 		mda_flat_ldest = dest & 0xff;
 
@@ -1118,11 +1121,7 @@ vlapic_pending_intr(struct vlapic *vlapic, int *vecptr)
 
 	irrptr = &lapic->irr0;
 
-	/*
-	 * The x86 architecture reserves the the first 32 vectors for use
-	 * by the processor.
-	 */
-	for (i = 7; i > 0; i--) {
+	for (i = 7; i >= 0; i--) {
 		idx = i * 4;
 		val = atomic_load_acq_int(&irrptr[idx]);
 		bitpos = fls(val);

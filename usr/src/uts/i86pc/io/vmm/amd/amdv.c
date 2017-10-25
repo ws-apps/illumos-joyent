@@ -1,13 +1,3 @@
-/*
- * COPYRIGHT 2014 Pluribus Networks Inc.
- *
- * All rights reserved. This copyright notice is Copyright Management
- * Information under 17 USC 1202 and is included to protect this work and
- * deter copyright infringement.  Removal or alteration of this Copyright
- * Management Information without the express written permission from
- * Pluribus Networks Inc is prohibited, and any such unauthorized removal
- * or alteration will be a violation of federal law.
- */
 /*-
  * Copyright (c) 2011 NetApp, Inc.
  * All rights reserved.
@@ -33,144 +23,19 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/sys/amd64/vmm/amd/amdv.c 245678 2013-01-20 03:42:49Z neel $
+ * $FreeBSD$
  */
 
 #include <sys/cdefs.h>
-__FBSDID("$FreeBSD: head/sys/amd64/vmm/amd/amdv.c 245678 2013-01-20 03:42:49Z neel $");
+__FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/errno.h>
-#include <sys/smp.h>
 
 #include <machine/vmm.h>
-#ifdef	__FreeBSD__
 #include "io/iommu.h"
-#endif
 
-static int
-amdv_init(void)
-{
-
-	printf("amdv_init: not implemented\n");
-	return (ENXIO);
-}
-
-static int
-amdv_cleanup(void)
-{
-
-	printf("amdv_cleanup: not implemented\n");
-	return (ENXIO);
-}
-
-static void *
-amdv_vminit(struct vm *vm)
-{
-
-	printf("amdv_vminit: not implemented\n");
-	return (NULL);
-}
-
-static int
-amdv_vmrun(void *arg, int vcpu, register_t rip)
-{
-
-	printf("amdv_vmrun: not implemented\n");
-	return (ENXIO);
-}
-
-static void
-amdv_vmcleanup(void *arg)
-{
-
-	printf("amdv_vmcleanup: not implemented\n");
-	return;
-}
-
-static int
-amdv_vmmmap_set(void *arg, vm_paddr_t gpa, vm_paddr_t hpa, size_t length,
-	    vm_memattr_t attr, int prot, boolean_t spok)
-{
-
-	printf("amdv_vmmmap_set: not implemented\n");
-	return (EINVAL);
-}
-
-static vm_paddr_t
-amdv_vmmmap_get(void *arg, vm_paddr_t gpa)
-{
-
-	printf("amdv_vmmmap_get: not implemented\n");
-	return (EINVAL);
-}
-
-static int
-amdv_getreg(void *arg, int vcpu, int regnum, uint64_t *retval)
-{
-	
-	printf("amdv_getreg: not implemented\n");
-	return (EINVAL);
-}
-
-static int
-amdv_setreg(void *arg, int vcpu, int regnum, uint64_t val)
-{
-	
-	printf("amdv_setreg: not implemented\n");
-	return (EINVAL);
-}
-
-static int
-amdv_getdesc(void *vmi, int vcpu, int num, struct seg_desc *desc)
-{
-
-	printf("amdv_get_desc: not implemented\n");
-	return (EINVAL);
-}
-
-static int
-amdv_setdesc(void *vmi, int vcpu, int num, struct seg_desc *desc)
-{
-
-	printf("amdv_get_desc: not implemented\n");
-	return (EINVAL);
-}
-
-static int
-amdv_getcap(void *arg, int vcpu, int type, int *retval)
-{
-
-	printf("amdv_getcap: not implemented\n");
-	return (EINVAL);
-}
-
-static int
-amdv_setcap(void *arg, int vcpu, int type, int val)
-{
-
-	printf("amdv_setcap: not implemented\n");
-	return (EINVAL);
-}
-
-struct vmm_ops vmm_ops_amd = {
-	amdv_init,
-	amdv_cleanup,
-	amdv_vminit,
-	amdv_vmrun,
-	amdv_vmcleanup,
-	amdv_vmmmap_set,
-	amdv_vmmmap_get,
-	amdv_getreg,
-	amdv_setreg,
-	amdv_getdesc,
-	amdv_setdesc,
-	amdv_getcap,
-	amdv_setcap
-};
-
-#ifdef	__FreeBSD__
 static int
 amd_iommu_init(void)
 {
@@ -233,14 +98,14 @@ amd_iommu_remove_mapping(void *domain, vm_paddr_t gpa, uint64_t len)
 }
 
 static void
-amd_iommu_add_device(void *domain, int bus, int slot, int func)
+amd_iommu_add_device(void *domain, uint16_t rid)
 {
 
 	printf("amd_iommu_add_device: not implemented\n");
 }
 
 static void
-amd_iommu_remove_device(void *domain, int bus, int slot, int func)
+amd_iommu_remove_device(void *domain, uint16_t rid)
 {
 
 	printf("amd_iommu_remove_device: not implemented\n");
@@ -266,4 +131,3 @@ struct iommu_ops iommu_ops_amd = {
 	amd_iommu_remove_device,
 	amd_iommu_invalidate_tlb,
 };
-#endif

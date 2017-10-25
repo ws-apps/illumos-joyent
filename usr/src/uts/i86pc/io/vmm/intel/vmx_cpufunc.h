@@ -33,7 +33,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/sys/amd64/vmm/intel/vmx_cpufunc.h 245678 2013-01-20 03:42:49Z neel $
+ * $FreeBSD$
  */
 
 #ifndef	_VMX_CPUFUNC_H_
@@ -69,22 +69,12 @@ vmxon(char *region)
 	int error;
 	uint64_t addr;
 
+#ifdef __FreeBSD__
 	addr = vtophys(region);
-	__asm __volatile("vmxon %[addr];"
-			 VMX_SET_ERROR_CODE
-			 : [error] "=r" (error)
-			 : [addr] "m" (*(uint64_t *)&addr)
-			 : "memory");
-
-	return (error);
-}
-
-/* returns 0 on success and non-zero on failure */
-static __inline int
-vmxon_pa(vm_paddr_t addr)
-{
-	int error;
-
+#else
+	/* This is pre-translated in illumos */
+	addr = (uint64_t)region;
+#endif
 	__asm __volatile("vmxon %[addr];"
 			 VMX_SET_ERROR_CODE
 			 : [error] "=r" (error)
