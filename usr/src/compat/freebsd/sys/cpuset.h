@@ -49,6 +49,7 @@ typedef int cpuset_t;
 
 #define	CPUSET(cpu)			(1UL << (cpu))
 
+#define	CPU_SETSIZE			(sizeof (cpuset_t))
 #define	CPU_SET_ATOMIC(cpu, set)	atomic_set_int((u_int *)(set), CPUSET(cpu))
 #define	CPU_CLR_ATOMIC(cpu, set)	atomic_clear_int((u_int *)(set), CPUSET(cpu))
 #define	CPU_ISSET(cpu, set)		((*(set) & CPUSET(cpu)) != 0)

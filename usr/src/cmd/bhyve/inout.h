@@ -33,7 +33,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $FreeBSD: head/usr.sbin/bhyve/inout.h 269094 2014-07-25 20:18:35Z neel $
+ * $FreeBSD$
  */
 
 #ifndef _INOUT_H_

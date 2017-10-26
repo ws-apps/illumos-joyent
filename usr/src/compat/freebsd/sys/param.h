@@ -13,6 +13,8 @@
 
 #ifndef	_KERNEL
 #define	MAXCOMLEN	16
+/* XXX: default value of the kernel tunable 'maxphys' in i86pc */
+#define	MAXPHYS		(56 * 1024)
 #endif
 #define	MAXHOSTNAMELEN	256
 #define	SPECNAMELEN	63
