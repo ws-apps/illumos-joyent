@@ -16,6 +16,7 @@
 #ifndef _COMPAT_FREEBSD_SYS__CPUSET_H_
 #define	_COMPAT_FREEBSD_SYS__CPUSET_H_
 
+#ifdef _KERNEL
 /*
  * The sys/_cpuset.h header is used to communicate the layout of cpuset_t while
  * sys/cpuset.h contains the manipulation routines.
@@ -26,5 +27,7 @@
 #define	_SYS__CPUSET_H_
 
 #include <sys/cpuvar.h>
+
+#endif /* _KERNEL */
 
 #endif	/* _COMPAT_FREEBSD_SYS__CPUSET_H_ */
