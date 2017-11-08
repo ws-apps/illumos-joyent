@@ -1035,7 +1035,7 @@ vm_get_stats(struct vmctx *ctx, int vcpu, struct timeval *ret_tv,
 
 	vmstats.cpuid = vcpu;
 
-	error = ioctl(ctx->fd, VM_STATS, &vmstats);
+	error = ioctl(ctx->fd, VM_STATS_IOC, &vmstats);
 	if (error == 0) {
 		if (ret_entries)
 			*ret_entries = vmstats.num_entries;
