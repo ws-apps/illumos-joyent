@@ -749,7 +749,7 @@ vm_mmap_memseg(struct vm *vm, vm_paddr_t gpa, int segid, vm_ooffset_t first,
 
 	vm_object_reference(seg->object);
 
-	/* Fire all sysmem mappings to be wired on illumos */
+	/* Configure all sysmem mappings to be wired on illumos */
 	if ((flags & VM_MEMMAP_F_WIRED) != 0 || seg->sysmem != 0) {
 		error = vm_map_wire(&vm->vmspace->vm_map, gpa, gpa + len,
 		    VM_MAP_WIRE_USER | VM_MAP_WIRE_NOHOLES);
@@ -1576,7 +1576,7 @@ vm_suspend(struct vm *vm, enum vm_suspend_how how)
 	if (how <= VM_SUSPEND_NONE || how >= VM_SUSPEND_LAST)
 		return (EINVAL);
 
-	if (atomic_cmpset_int(&vm->suspend, 0, how) == 0) {
+	if (atomic_cmpset_int((uint_t *)&vm->suspend, 0, how) == 0) {
 		VM_CTR2(vm, "virtual machine already suspended %d/%d",
 		    vm->suspend, how);
 		return (EALREADY);
@@ -2674,3 +2674,34 @@ vm_get_wiredcnt(struct vm *vm, int vcpu, struct vmm_stat_type *stat)
 
 VMM_STAT_FUNC(VMM_MEM_RESIDENT, "Resident memory", vm_get_rescnt);
 VMM_STAT_FUNC(VMM_MEM_WIRED, "Wired memory", vm_get_wiredcnt);
+
+#ifndef __FreeBSD__
+int
+vm_do_segmap(struct vm *vm, off_t off, struct as *as, caddr_t *addrp,
+    off_t len, uint_t prot, uint_t maxprot, uint_t flags, cred_t *cr)
+{
+	struct vmspace *vms = vm->vmspace;
+	int err;
+
+	err = vm_map_user(vms, off, as, addrp, len, prot, maxprot, flags, cr);
+
+	return (err);
+}
+
+int vm_do_segmap_segid(struct vm *vm, int segid, struct as *as, caddr_t *addrp,
+     uint_t prot, uint_t maxprot, uint_t flags, cred_t *cr)
+{
+	struct vmspace *vms = vm->vmspace;
+	vm_object_t vmo;
+	int err;
+
+	err = vm_get_memseg(vm, segid, NULL, NULL, &vmo);
+	if (err != 0) {
+		return (err);
+	}
+
+	err = vm_map_user_obj(vms, vmo, as, addrp, prot, maxprot, flags, cr);
+
+	return (err);
+}
+#endif /* __FreeBSD__ */

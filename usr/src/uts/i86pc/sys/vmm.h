@@ -685,11 +685,20 @@ int vm_restart_instruction(void *vm, int vcpuid);
 
 #ifndef	__FreeBSD__
 #ifdef	_KERNEL
-extern void vmm_sol_glue_init(void);
-extern void vmm_sol_glue_cleanup(void);
 
-extern int vmm_mod_load(void);
-extern int vmm_mod_unload(void);
+#include <vm/as.h>
+#include <sys/cred.h>
+
+void vmm_sol_glue_init(void);
+void vmm_sol_glue_cleanup(void);
+
+int vmm_mod_load(void);
+int vmm_mod_unload(void);
+
+int vm_do_segmap(struct vm *, off_t, struct as *, caddr_t *, off_t, uint_t,
+    uint_t, uint_t, cred_t *);
+int vm_do_segmap_segid(struct vm *, int, struct as *, caddr_t *, uint_t,
+    uint_t, uint_t, cred_t *);
 #endif
 #endif
 
