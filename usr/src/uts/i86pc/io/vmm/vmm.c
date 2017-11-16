@@ -749,8 +749,7 @@ vm_mmap_memseg(struct vm *vm, vm_paddr_t gpa, int segid, vm_ooffset_t first,
 
 	vm_object_reference(seg->object);
 
-	/* Configure all sysmem mappings to be wired on illumos */
-	if ((flags & VM_MEMMAP_F_WIRED) != 0 || seg->sysmem != 0) {
+	if ((flags & VM_MEMMAP_F_WIRED) != 0) {
 		error = vm_map_wire(&vm->vmspace->vm_map, gpa, gpa + len,
 		    VM_MAP_WIRE_USER | VM_MAP_WIRE_NOHOLES);
 		if (error != KERN_SUCCESS) {
@@ -1760,7 +1759,7 @@ restart:
 	VCPU_CTR2(vm, vcpuid, "retu %d/%d", error, vme->exitcode);
 
 	/* copy the exit information */
-	bcopy(vme, &vmrun->vm_exit, sizeof(struct vm_exit));
+	bcopy(vme, &vmrun->vm_exit, sizeof (struct vm_exit));
 	return (error);
 }
 

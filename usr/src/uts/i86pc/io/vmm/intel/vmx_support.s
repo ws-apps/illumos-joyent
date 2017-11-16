@@ -147,12 +147,16 @@ ENTRY(vmx_enter_guest)
 	movq	VMXCTX_PMAP(%rdi), %r11
 	pushq	%rdi
 	pushq	%rsi
+	pushq	%rdx
+	push	%r11
 	leaq	PM_ACTIVE(%r11), %rdi
 	movl	%gs:CPU_ID, %esi
 	call	cpuset_atomic_add
+	popq	%r11
+	popq	%rdx
 	popq	%rsi
 	popq	%rdi
-	movl    %gs:CPU_ID, %eax
+	movl	%gs:CPU_ID, %eax
 #endif /* __FreeBSD__ */
 
 	/*
@@ -233,8 +237,8 @@ inst_error:
 
 #ifndef __FreeBSD__
 	/* This call must wait until after %rsp is fixed by VMX_HOST_RESTORE */
-	movq	VMXCTX_PMAP(%rdi), %r11
-	leaq	PM_ACTIVE(%r11), %rdi
+	movq	VMXCTX_PMAP(%rdi), %rdi
+	leaq	PM_ACTIVE(%rdi), %rdi
 	movl	%gs:CPU_ID, %esi
 	pushq	%rax
 	call	cpuset_atomic_del
@@ -282,11 +286,18 @@ ALTENTRY(vmx_exit_guest)
 	movq	VMXCTX_PMAP(%rdi), %r11
 	movl	PCPU(CPUID), %r10d
 	LK btrl	%r10d, PM_ACTIVE(%r11)
-#else /* __FreeBSD__ */
-	/* XXXJOY do cpuset_del */
 #endif /* __FreeBSD__ */
 
 	VMX_HOST_RESTORE
+
+#ifndef __FreeBSD__
+	/* This call must wait until after %rsp is fixed by VMX_HOST_RESTORE */
+	movq	VMXCTX_PMAP(%rdi), %r11
+	leaq	PM_ACTIVE(%r11), %rdi
+	movl	%gs:CPU_ID, %esi
+	call	cpuset_atomic_del
+#endif /* __FreeBSD__ */
+
 
 	/*
 	 * This will return to the caller of 'vmx_enter_guest()' with a return

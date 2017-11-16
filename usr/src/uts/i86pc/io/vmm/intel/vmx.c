@@ -109,11 +109,18 @@ __FBSDID("$FreeBSD$");
 #define	PROCBASED_CTLS2_ONE_SETTING	PROCBASED2_ENABLE_EPT
 #define	PROCBASED_CTLS2_ZERO_SETTING	0
 
+#ifdef __FreeBSD__
 #define	VM_EXIT_CTLS_ONE_SETTING					\
 	(VM_EXIT_HOST_LMA			|			\
 	VM_EXIT_SAVE_EFER			|			\
 	VM_EXIT_LOAD_EFER			|			\
 	VM_EXIT_ACKNOWLEDGE_INTERRUPT)
+#else
+#define	VM_EXIT_CTLS_ONE_SETTING					\
+	(VM_EXIT_HOST_LMA			|			\
+	VM_EXIT_SAVE_EFER			|			\
+	VM_EXIT_LOAD_EFER)
+#endif /* __FreeBSD__ */
 
 #define	VM_EXIT_CTLS_ZERO_SETTING	VM_EXIT_SAVE_DEBUG_CONTROLS
 
@@ -825,8 +832,7 @@ vmx_trigger_hostintr(int vector)
 	func = ((long)gd->gd_hioffset << 16 | gd->gd_looffset);
 	vmx_call_isr(func);
 #else
-	/* XXXJOY: not even sure if this is wired up normally? */
-	panic("unexpected host interrupt trigger");
+	/* XXXJOY: The host interrupt shoud have already been handled(?) */
 #endif /* __FreeBSD__ */
 }
 
@@ -1041,6 +1047,8 @@ vmx_exit_trace(struct vmx *vmx, int vcpu, uint64_t rip, uint32_t exit_reason,
 		 handled ? "handled" : "unhandled",
 		 exit_reason_to_str(exit_reason), rip);
 #endif
+	DTRACE_PROBE3(vmm__vexit, int, vcpu, uint64_t, rip,
+	    uint32_t, exit_reason);
 }
 
 static __inline void
@@ -1120,6 +1128,10 @@ static void
 vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 {
 	struct vmxstate *vmxstate;
+
+#ifndef __FreeBSD__
+	vmcs_write(VMCS_HOST_FS_BASE, vmm_get_host_fsbase());
+#endif
 
 	vmxstate = &vmx->state[vcpu];
 	if (vmxstate->lastcpu == curcpu)

@@ -30,7 +30,7 @@
 #include <vm/vm_map.h>
 #include "vm/vm_glue.h"
 
-#define	PMAP_TO_VMSPACE(pm)	((struct vmspace *)		\
+#define	PMAP_TO_VMMAP(pm)	((vm_map_t)		\
 	((caddr_t)(pm) - offsetof(struct vmspace, vms_pmap)))
 #define	VMMAP_TO_VMSPACE(vmmap)	((struct vmspace *)		\
 	((caddr_t)(vmmap) - offsetof(struct vmspace, vm_map)))
@@ -208,6 +208,7 @@ vmspace_pmap_wire(struct vmspace *vms, caddr_t addr, size_t size, page_t **pp,
 			oldpp = eptable_mapin(map, maddr, pp[idx], prot);
 			ASSERT(oldpp == NULL);
 		}
+		vms->vms_pmap.pm_eptgen++;
 		return (0);
 	}
 	case PT_RVI:
@@ -267,6 +268,7 @@ vmspace_pmap_unmap(struct vmspace *vms, caddr_t addr, size_t size)
 				page_unlock(pp);
 			}
 		}
+		vms->vms_pmap.pm_eptgen++;
 		return (0);
 	}
 		break;
@@ -357,8 +359,13 @@ pmap_wired_count(pmap_t pmap)
 int
 pmap_emulate_accessed_dirty(pmap_t pmap, vm_offset_t va, int ftype)
 {
-	/* XXXJOY: finish */
-	return (0L);
+	vm_map_t map = PMAP_TO_VMMAP(pmap);
+
+	/*
+	 * Faults not related to execution come in as accessed/dirty calls.
+	 * For now, just handle them as faults.
+	 */
+	return (vm_fault(map, va, ftype, 0));
 }
 
 
@@ -841,12 +848,14 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 	struct as *as = vms->vms_as;
 	struct seg *seg;
 	uint_t prot;
+	int err = 0;
 
 	mutex_enter(&vms->vms_lock);
 
 	if (vmspace_pmap_iswired(vms, addr, &prot) == 0) {
 		/* The page is wired up, perhaps the prot is wrong? */
 		if ((prot & type) != type) {
+			mutex_exit(&vms->vms_lock);
 			return (EFAULT);
 		}
 		panic("unexpected vm_fault %p %x %x", addr, type, prot);
@@ -876,7 +885,6 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 		const ulong_t idx = btop(vmsm->vmsm_offset +
 		    (align_addr - vmsm->vmsm_addr));
 		cred_t *cr = CRED();
-		int err;
 
 		VERIFY(seg->s_ops == &segvn_ops);
 		svd = (struct segvn_data *)seg->s_data;
@@ -897,8 +905,8 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 			VERIFY0(vmspace_pmap_wire(vms, align_addr, align_size,
 			    pp, prot));
 		}
-		return (err);
 	}
+		break;
 	default:
 		panic("unsupported object type: %x", type);
 		/* NOTREACHED */
