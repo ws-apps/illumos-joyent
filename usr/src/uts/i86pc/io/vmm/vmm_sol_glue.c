@@ -343,8 +343,16 @@ vmm_glue_callout_init(struct callout *c, int mpsafe)
 	when.cyt_interval = CY_INFINITY;
 
 	mutex_enter(&cpu_lock);
-	c->c_cyc_id = cyclic_add(&hdlr, &when);
+#if 0
+	/*
+	 * XXXJOY: according to the freebsd sources, callouts do not begin
+	 * their life in the ACTIVE state.
+	 */
 	c->c_flags |= CALLOUT_ACTIVE;
+#else
+	bzero(c, sizeof (*c));
+#endif
+	c->c_cyc_id = cyclic_add(&hdlr, &when);
 	mutex_exit(&cpu_lock);
 }
 
@@ -367,10 +375,11 @@ vmm_glue_callout_reset_sbt(struct callout *c, sbintime_t sbt, sbintime_t pr,
 	c->c_arg = arg;
 	c->c_flags |= (CALLOUT_ACTIVE | CALLOUT_PENDING);
 
-	if (flags & C_ABSOLUTE)
+	if (flags & C_ABSOLUTE) {
 		cyclic_reprogram(c->c_cyc_id, target);
-	else
+	} else {
 		cyclic_reprogram(c->c_cyc_id, target + gethrtime());
+	}
 
 	return (0);
 }

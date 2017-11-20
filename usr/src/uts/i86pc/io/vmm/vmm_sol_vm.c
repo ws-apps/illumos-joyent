@@ -25,6 +25,7 @@
 #include <vm/as.h>
 #include <vm/seg_vn.h>
 #include <vm/seg_kmem.h>
+#include <vm/seg_vmm.h>
 
 #include <vm/vm_extern.h>
 #include <vm/vm_map.h>
@@ -45,6 +46,7 @@ struct eptable {
 	uint32_t	_ept_pad2;
 	struct eptable	*ept_prev;
 	struct eptable	*ept_parent;
+	void		*ept_kva;
 };
 typedef struct eptable eptable_t;
 
@@ -98,9 +100,10 @@ typedef struct eptable_map eptable_map_t;
 struct vmspace_mapping {
 	list_node_t	vmsm_node;
 	vm_object_t	vmsm_object;
-	caddr_t		vmsm_addr;
+	uintptr_t	vmsm_addr;
 	size_t		vmsm_len;
 	off_t		vmsm_offset;
+	uint_t		vmsm_prot;
 };
 typedef struct vmspace_mapping vmspace_mapping_t;
 
@@ -115,22 +118,43 @@ static void eptable_hash_insert(eptable_map_t *, eptable_t *);
 static void eptable_hash_remove(eptable_map_t *, eptable_t *);
 static eptable_t *eptable_walk(eptable_map_t *, uintptr_t, level_t, uint_t *,
     boolean_t);
-static page_t *eptable_mapin(eptable_map_t *, uintptr_t, page_t *, uint_t);
-static page_t *eptable_mapout(eptable_map_t *, uintptr_t);
+static pfn_t eptable_mapin(eptable_map_t *, uintptr_t, pfn_t, uint_t, uint_t);
+static void eptable_mapout(eptable_map_t *, uintptr_t);
 static int eptable_find(eptable_map_t *, uintptr_t, pfn_t *, uint_t *);
-static void vm_object_release(vm_object_t);
-static vmspace_mapping_t *vm_mapping_find(struct vmspace *, caddr_t, size_t);
+static vmspace_mapping_t *vm_mapping_find(struct vmspace *, uintptr_t, size_t);
 static void vm_mapping_remove(struct vmspace *, vmspace_mapping_t *);
-
 
 static kmutex_t eptable_map_lock;
 static struct eptable_map *eptable_map_head = NULL;
+
+static vmem_t	*vmm_arena = NULL;
+
+
+void
+vmm_arena_init(void)
+{
+	/*
+	 * XXXJOY: Hahaha, this is terrible, pls fix, prototype only
+	 */
+	vmm_arena = vmem_create("vmm_arena", NULL, 0, PAGESIZE,
+	    segkmem_zio_alloc, segkmem_zio_free, zio_arena, 0, VM_SLEEP);
+}
+
+boolean_t
+vmm_arena_fini(void)
+{
+	if (vmem_size(vmm_arena, VMEM_ALLOC) != 0) {
+		return (B_FALSE);
+	}
+	vmem_destroy(vmm_arena);
+	vmm_arena = NULL;
+	return (B_TRUE);
+}
 
 struct vmspace *
 vmspace_alloc(vm_offset_t start, vm_offset_t end, pmap_pinit_t pinit)
 {
 	struct vmspace *vms;
-	struct as *as;
 	const uintptr_t size = end + 1;
 
 	/*
@@ -151,25 +175,14 @@ vmspace_alloc(vm_offset_t start, vm_offset_t end, pmap_pinit_t pinit)
 		return (NULL);
 	}
 
-	as = as_alloc();
-	as->a_userlimit = (caddr_t)end;
-
-	/* For now, lock all new mappings into the AS automatically */
-	VERIFY0(as_ctl(as, NULL, 0, MC_LOCKAS, 0, MCL_FUTURE, NULL, 0));
-
-	vms->vms_as = as;
 	return (vms);
 }
 
 void
 vmspace_free(struct vmspace *vms)
 {
-	struct as *as = vms->vms_as;
-
 	VERIFY(list_is_empty(&vms->vms_maplist));
-	VERIFY0(avl_numnodes(&as->a_segtree));
 
-	as_free(as);
 	pmap_free(&vms->vms_pmap);
 	kmem_free(vms, sizeof (*vms));
 }
@@ -188,7 +201,7 @@ vmspace_resident_count(struct vmspace *vms)
 }
 
 static int
-vmspace_pmap_wire(struct vmspace *vms, caddr_t addr, size_t size, page_t **pp,
+vmspace_pmap_wire(struct vmspace *vms, uintptr_t addr, pfn_t pfn, uint_t lvl,
     uint_t prot)
 {
 	enum pmap_type type = vms->vms_pmap.pm_type;
@@ -198,16 +211,9 @@ vmspace_pmap_wire(struct vmspace *vms, caddr_t addr, size_t size, page_t **pp,
 	switch (type) {
 	case PT_EPT: {
 		eptable_map_t *map = (eptable_map_t *)vms->vms_pmap.pm_map;
-		uintptr_t maddr = (uintptr_t)addr;
-		const ulong_t npages = btop(size);
-		ulong_t idx;
 
-		for (idx = 0; idx < npages; idx++, maddr += PAGESIZE) {
-			page_t *oldpp;
+		(void) eptable_mapin(map, addr, pfn, lvl, prot);
 
-			oldpp = eptable_mapin(map, maddr, pp[idx], prot);
-			ASSERT(oldpp == NULL);
-		}
 		vms->vms_pmap.pm_eptgen++;
 		return (0);
 	}
@@ -222,7 +228,7 @@ vmspace_pmap_wire(struct vmspace *vms, caddr_t addr, size_t size, page_t **pp,
 }
 
 static int
-vmspace_pmap_iswired(struct vmspace *vms, caddr_t addr, uint_t *prot)
+vmspace_pmap_iswired(struct vmspace *vms, uintptr_t addr, uint_t *prot)
 {
 	enum pmap_type type = vms->vms_pmap.pm_type;
 
@@ -231,10 +237,9 @@ vmspace_pmap_iswired(struct vmspace *vms, caddr_t addr, uint_t *prot)
 	switch (type) {
 	case PT_EPT: {
 		eptable_map_t *map = (eptable_map_t *)vms->vms_pmap.pm_map;
-		uintptr_t maddr = (uintptr_t)addr;
 		pfn_t pfn;
 
-		return (eptable_find(map, maddr, &pfn, prot));
+		return (eptable_find(map, addr, &pfn, prot));
 	}
 	case PT_RVI:
 		/* RVI support not yet implemented */
@@ -247,7 +252,7 @@ vmspace_pmap_iswired(struct vmspace *vms, caddr_t addr, uint_t *prot)
 }
 
 static int
-vmspace_pmap_unmap(struct vmspace *vms, caddr_t addr, size_t size)
+vmspace_pmap_unmap(struct vmspace *vms, uintptr_t addr, size_t size)
 {
 	enum pmap_type type = vms->vms_pmap.pm_type;
 
@@ -260,13 +265,9 @@ vmspace_pmap_unmap(struct vmspace *vms, caddr_t addr, size_t size)
 		const ulong_t npages = btop(size);
 		ulong_t idx;
 
+		/* XXXJOY: punt on large pages for now */
 		for (idx = 0; idx < npages; idx++, maddr += PAGESIZE) {
-			page_t *pp;
-
-			pp = eptable_mapout(map, maddr);
-			if (pp != NULL) {
-				page_unlock(pp);
-			}
+			eptable_mapout(map, maddr);
 		}
 		vms->vms_pmap.pm_eptgen++;
 		return (0);
@@ -313,14 +314,12 @@ pmap_pinit_type(pmap_t pmap, enum pmap_type type, int flags)
 	switch (type) {
 	case PT_EPT: {
 		eptable_map_t *map;
-		caddr_t pml4_va;
 
 		map = kmem_zalloc(sizeof (*map), KM_SLEEP);
 		eptable_init(map);
-		pml4_va = hat_kpm_mapin_pfn(map->em_root->ept_pfn);
 
 		pmap->pm_map = map;
-		pmap->pm_pml4 = pml4_va;
+		pmap->pm_pml4 = map->em_root->ept_kva;
 		return (1);
 	}
 	case PT_RVI:
@@ -359,13 +358,8 @@ pmap_wired_count(pmap_t pmap)
 int
 pmap_emulate_accessed_dirty(pmap_t pmap, vm_offset_t va, int ftype)
 {
-	vm_map_t map = PMAP_TO_VMMAP(pmap);
-
-	/*
-	 * Faults not related to execution come in as accessed/dirty calls.
-	 * For now, just handle them as faults.
-	 */
-	return (vm_fault(map, va, ftype, 0));
+	/* Allow the fallback to vm_fault to handle this */
+	return (-1);
 }
 
 
@@ -373,22 +367,12 @@ static eptable_t *
 eptable_alloc(void)
 {
 	eptable_t *ept;
-	page_t *pp;
-	caddr_t pva;
+	caddr_t page;
 
 	ept = kmem_zalloc(sizeof (*ept), KM_SLEEP);
-
-	do {
-		pp = page_get_physical((uintptr_t)ept);
-		if (pp == NULL) {
-			kmem_reap();
-			delay(1);
-		}
-	} while (pp == NULL);
-
-	ept->ept_pfn = pp->p_pagenum;
-	pva = hat_kpm_mapin_pfn(pp->p_pagenum);
-	bzero(pva, PAGESIZE);
+	page = kmem_zalloc(PAGESIZE, KM_SLEEP);
+	ept->ept_kva = page;
+	ept->ept_pfn = hat_getpfnum(kas.a_hat, page);
 
 	return (ept);
 }
@@ -396,24 +380,15 @@ eptable_alloc(void)
 static void
 eptable_free(eptable_t *ept)
 {
-	page_t *pp;
+	void *page = ept->ept_kva;
 
 	ASSERT(ept->ept_pfn != PFN_INVALID);
-
-	pp = page_numtopp_nolock(ept->ept_pfn);
-	if (!page_tryupgrade(pp)) {
-		u_offset_t off = pp->p_offset;
-
-		page_unlock(pp);
-		pp = page_lookup(&kvp, off, SE_EXCL);
-		if (pp == NULL)
-			panic("page not found");
-	}
-	page_hashout(pp, NULL);
-	page_free(pp, 1);
-	page_unresv(1);
+	ASSERT(ept->ept_kva != NULL);
 
 	ept->ept_pfn = PFN_INVALID;
+	ept->ept_kva = NULL;
+
+	kmem_free(page, PAGESIZE);
 	kmem_free(ept, sizeof (*ept));
 }
 
@@ -561,7 +536,7 @@ eptable_walk(eptable_map_t *map, uintptr_t va, level_t tgtlvl, uint_t *idxp,
 			break;
 		}
 
-		ptes = (x86pte_t *)hat_kpm_mapin_pfn(ept->ept_pfn);
+		ptes = (x86pte_t *)ept->ept_kva;
 		entry = ptes[idx];
 		if (EPT_IS_ABSENT(entry)) {
 			if (!do_create) {
@@ -601,15 +576,15 @@ eptable_walk(eptable_map_t *map, uintptr_t va, level_t tgtlvl, uint_t *idxp,
 	return (ept);
 }
 
-static page_t *
-eptable_mapin(eptable_map_t *map, uintptr_t va, page_t *pp, uint_t prot)
+static pfn_t
+eptable_mapin(eptable_map_t *map, uintptr_t va, pfn_t pfn, uint_t lvl,
+    uint_t prot)
 {
-	level_t tgtlvl;
 	uint_t idx;
 	eptable_t *ept;
 	x86pte_t *ptes, entry;
-	size_t pgsize;
-	page_t *oldpp = NULL;
+	const size_t pgsize = (size_t)LEVEL_SIZE(lvl);
+	pfn_t oldpfn = PFN_INVALID;
 
 	CTASSERT(EPT_R == PROT_READ);
 	CTASSERT(EPT_W == PROT_WRITE);
@@ -617,18 +592,14 @@ eptable_mapin(eptable_map_t *map, uintptr_t va, page_t *pp, uint_t prot)
 	ASSERT((prot & EPT_RWX) != 0 && (prot & ~EPT_RWX) == 0);
 
 	/* XXXJOY: punt on large pages for now */
-	VERIFY(pp->p_szc == 0);
-	tgtlvl = 0;
-	pgsize = (size_t)LEVEL_SIZE((uint_t)tgtlvl);
+	VERIFY(lvl == 0);
 
 	mutex_enter(&map->em_lock);
-	ept = eptable_walk(map, va, tgtlvl, &idx, B_TRUE);
-	ptes = (x86pte_t *)hat_kpm_mapin_pfn(ept->ept_pfn);
+	ept = eptable_walk(map, va, (level_t)lvl, &idx, B_TRUE);
+	ptes = (x86pte_t *)ept->ept_kva;
 	entry = ptes[idx];
 
 	if (!EPT_IS_ABSENT(entry)) {
-		pfn_t oldpfn;
-
 		if (EPT_IS_TABLE(entry)) {
 			panic("unexpected table entry %lx in %p[%d]",
 			    entry, ept, idx);
@@ -641,33 +612,29 @@ eptable_mapin(eptable_map_t *map, uintptr_t va, page_t *pp, uint_t prot)
 		ept->ept_valid_cnt--;
 		ptes[idx] = (x86pte_t)0;
 		map->em_wired -= (pgsize >> PAGESHIFT);
-
-		/* The page should have been locked when it was wired in */
-		oldpp = page_numtopp_nolock(oldpfn);
 	}
 
-	entry = EPT_PTE_ASSIGN_PAGE(pp->p_pagenum, prot);
+	entry = EPT_PTE_ASSIGN_PAGE(pfn, prot);
 	ptes[idx] = entry;
 	ept->ept_valid_cnt++;
 	map->em_wired += (pgsize >> PAGESHIFT);
 	mutex_exit(&map->em_lock);
 
-	return (oldpp);
+	return (oldpfn);
 }
 
-static page_t *
+static void
 eptable_mapout(eptable_map_t *map, uintptr_t va)
 {
 	eptable_t *ept;
 	uint_t idx;
 	x86pte_t *ptes, entry;
-	page_t *oldpp = NULL;
 
 	mutex_enter(&map->em_lock);
 	/* Find the lowest level entry at this VA */
 	ept = eptable_walk(map, va, -1, &idx, B_FALSE);
 
-	ptes = (x86pte_t *)hat_kpm_mapin_pfn(ept->ept_pfn);
+	ptes = (x86pte_t *)ept->ept_kva;
 	entry = ptes[idx];
 
 	if (EPT_IS_ABSENT(entry)) {
@@ -676,7 +643,7 @@ eptable_mapout(eptable_map_t *map, uintptr_t va)
 		 * wired mapping, the absence is no concern.
 		 */
 		mutex_exit(&map->em_lock);
-		return (NULL);
+		return;
 	} else {
 		pfn_t oldpfn;
 		const size_t pagesize = LEVEL_SIZE((uint_t)ept->ept_level);
@@ -693,16 +660,13 @@ eptable_mapout(eptable_map_t *map, uintptr_t va)
 		ept->ept_valid_cnt--;
 		ptes[idx] = (x86pte_t)0;
 		map->em_wired -= (pagesize >> PAGESHIFT);
-
-		/* The page should have been locked when it was wired in */
-		oldpp = page_numtopp_nolock(oldpfn);
 	}
 
 	while (ept->ept_valid_cnt == 0 && ept->ept_parent != NULL) {
 		eptable_t *next = ept->ept_parent;
 
 		idx = EPTABLE_VA2IDX(next, va);
-		ptes = (x86pte_t *)hat_kpm_mapin_pfn(next->ept_pfn);
+		ptes = (x86pte_t *)next->ept_kva;
 
 		entry = ptes[idx];
 		ASSERT(EPT_IS_TABLE(entry));
@@ -717,8 +681,6 @@ eptable_mapout(eptable_map_t *map, uintptr_t va)
 		ept = next;
 	}
 	mutex_exit(&map->em_lock);
-
-	return (oldpp);
 }
 
 static int
@@ -739,7 +701,7 @@ eptable_find(eptable_map_t *map, uintptr_t va, pfn_t *pfn, uint_t *prot)
 		return (-1);
 	}
 
-	ptes = (x86pte_t *)hat_kpm_mapin_pfn(ept->ept_pfn);
+	ptes = (x86pte_t *)ept->ept_kva;
 	entry = ptes[idx];
 
 	if (!EPT_IS_ABSENT(entry)) {
@@ -774,8 +736,10 @@ vm_object_allocate(objtype_t type, vm_pindex_t psize)
 	vmo->vmo_type = type;
 	vmo->vmo_size = size;
 
-	vmo->vmo_refcnt = 0;
-	vmo->vmo_amp = anonmap_alloc(size, 0, ANON_SLEEP);
+	vmo->vmo_refcnt = 1;
+	vmo->vmo_kmem = vmem_alloc(vmm_arena, size, KM_SLEEP);
+	bzero(vmo->vmo_kmem, size); /* XXXJOY: Better zeroing approach? */
+
 	/* XXXJOY: opt-in to larger pages? */
 
 	return (vmo);
@@ -784,36 +748,23 @@ vm_object_allocate(objtype_t type, vm_pindex_t psize)
 void
 vm_object_deallocate(vm_object_t vmo)
 {
-	struct anon_map *amp = vmo->vmo_amp;
-
 	/* only support anon for now */
+	ASSERT(vmo != NULL);
 	VERIFY(vmo->vmo_type == OBJT_DEFAULT);
 
-	/* By the time this is deallocated, its mappings should be gone. */
-	VERIFY(vmo->vmo_refcnt == 0);
-
-	ANON_LOCK_ENTER(&amp->a_rwlock, RW_WRITER);
-	amp->refcnt--;
-	if (amp->refcnt != 0) {
-		/*
-		 * It is possible that userspace still has lingering mappings
-		 * to the guest memory.  In such cases, clean-up of the anon
-		 * resources is left to the consuming segment(s).
-		 */
-		ANON_LOCK_EXIT(&amp->a_rwlock);
-	} else {
-		/* Release anon memory */
-		anonmap_purge(amp);
-		if (amp->a_szc != 0) {
-			anon_shmap_free_pages(amp, 0, amp->size);
-		} else {
-			anon_free(amp->ahp, 0, amp->size);
-		}
-		ANON_LOCK_EXIT(&amp->a_rwlock);
-
-		anonmap_free(amp);
+	mutex_enter(&vmo->vmo_lock);
+	VERIFY(vmo->vmo_refcnt);
+	vmo->vmo_refcnt--;
+	if (vmo->vmo_refcnt != 0) {
+		mutex_exit(&vmo->vmo_lock);
+		return;
 	}
-	vmo->vmo_amp = NULL;
+
+	vmem_free(vmm_arena, vmo->vmo_kmem, vmo->vmo_size);
+	vmo->vmo_kmem = NULL;
+	vmo->vmo_size = 0;
+	mutex_exit(&vmo->vmo_lock);
+	mutex_destroy(&vmo->vmo_lock);
 	kmem_free(vmo, sizeof (*vmo));
 }
 
@@ -827,26 +778,111 @@ vm_object_reference(vm_object_t vmo)
 	mutex_exit(&vmo->vmo_lock);
 }
 
-static void
-vm_object_release(vm_object_t vmo)
+static vmspace_mapping_t *
+vm_mapping_find(struct vmspace *vms, uintptr_t addr, size_t size)
 {
-	ASSERT(vmo != NULL);
+	vmspace_mapping_t *vmsm;
+	list_t *ml = &vms->vms_maplist;
+	const uintptr_t range_end = addr + size;
 
-	mutex_enter(&vmo->vmo_lock);
-	VERIFY(vmo->vmo_refcnt);
-	vmo->vmo_refcnt--;
-	mutex_exit(&vmo->vmo_lock);
+	ASSERT(MUTEX_HELD(&vms->vms_lock));
+	ASSERT(addr <= range_end);
+
+	if (addr >= vms->vms_size) {
+		return (NULL);
+	}
+	for (vmsm = list_head(ml); vmsm != NULL; vmsm = list_next(ml, vmsm)) {
+		const uintptr_t seg_end = vmsm->vmsm_addr + vmsm->vmsm_len;
+
+		if (addr >= vmsm->vmsm_addr && addr < seg_end) {
+			if (range_end <= seg_end) {
+				return (vmsm);
+			} else {
+				return (NULL);
+			}
+		}
+	}
+	return (NULL);
 }
 
+static boolean_t
+vm_mapping_gap(struct vmspace *vms, uintptr_t addr, size_t size)
+{
+	vmspace_mapping_t *vmsm;
+	list_t *ml = &vms->vms_maplist;
+	const uintptr_t range_end = addr + size;
+
+	ASSERT(MUTEX_HELD(&vms->vms_lock));
+
+	for (vmsm = list_head(ml); vmsm != NULL; vmsm = list_next(ml, vmsm)) {
+		const uintptr_t seg_end = vmsm->vmsm_addr + vmsm->vmsm_len;
+
+		if ((vmsm->vmsm_addr >= addr && vmsm->vmsm_addr < range_end) ||
+		    (seg_end >= addr && seg_end < range_end)) {
+			return (B_FALSE);
+		}
+	}
+	return (B_TRUE);
+}
+
+static void
+vm_mapping_remove(struct vmspace *vms, vmspace_mapping_t *vmsm)
+{
+	list_t *ml = &vms->vms_maplist;
+
+	ASSERT(MUTEX_HELD(&vms->vms_lock));
+
+	list_remove(ml, vmsm);
+	vm_object_deallocate(vmsm->vmsm_object);
+	kmem_free(vmsm, sizeof (*vmsm));
+}
+
+static pfn_t
+vm_mapping_page(vmspace_mapping_t *vmsm, uintptr_t vaddr, pfn_t *lpfn,
+    uint_t *lvl)
+{
+	const uintptr_t off = (vaddr - (uintptr_t)vmsm->vmsm_addr);
+	const uintptr_t kaddr = (uintptr_t)vmsm->vmsm_object->vmo_kmem + off;
+	uint_t idx, level;
+	htable_t *ht;
+	x86pte_t pte;
+	pfn_t top_pfn, pfn;
+	size_t top_size;
+
+	VERIFY(vmsm->vmsm_object->vmo_type == OBJT_DEFAULT);
+
+	ht = htable_getpage(kas.a_hat, kaddr, &idx);
+	if (ht == NULL) {
+		return (PFN_INVALID);
+	}
+	pte = x86pte_get(ht, idx);
+	if (!PTE_ISPAGE(pte, ht->ht_level)) {
+		htable_release(ht);
+		return (PFN_INVALID);
+	}
+
+	pfn = top_pfn = PTE2PFN(pte, ht->ht_level);
+	level = ht->ht_level;
+	if (ht->ht_level > 0) {
+		pfn += mmu_btop(vaddr & LEVEL_OFFSET((uint_t)ht->ht_level));
+	}
+	htable_release(ht);
+
+	if (lpfn != NULL) {
+		*lpfn = top_pfn;
+	}
+	if (lvl != NULL) {
+		*lvl = level;
+	}
+	return (pfn);
+}
 
 int
 vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 {
 	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
-	const caddr_t addr = (caddr_t)off;
+	const uintptr_t addr = off;
 	vmspace_mapping_t *vmsm;
-	struct as *as = vms->vms_as;
-	struct seg *seg;
 	uint_t prot;
 	int err = 0;
 
@@ -856,7 +892,7 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 		/* The page is wired up, perhaps the prot is wrong? */
 		if ((prot & type) != type) {
 			mutex_exit(&vms->vms_lock);
-			return (EFAULT);
+			return (FC_PROT);
 		}
 		panic("unexpected vm_fault %p %x %x", addr, type, prot);
 		/*NOTREACHED*/
@@ -865,46 +901,28 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 	/* Try to wire up the address */
 	if ((vmsm = vm_mapping_find(vms, addr, 0)) == NULL) {
 		mutex_exit(&vms->vms_lock);
-		return (ENOENT);
+		return (FC_NOMAP);
 	}
 	type = vmsm->vmsm_object->vmo_type;
-	as = vms->vms_as;
-
-	AS_LOCK_ENTER(as, RW_READER);
-	VERIFY(seg = as_segat(as, addr));
+	prot = vmsm->vmsm_prot;
 
 	switch (type) {
 	case OBJT_DEFAULT: {
-		struct anon_map *amp = vmsm->vmsm_object->vmo_amp;
-		struct segvn_data *svd;
-		/* XXXJOY: punt on large pages for now */
-		const size_t align_size = PAGESIZE;
-		page_t *pp[1];
-		const caddr_t align_addr = (caddr_t)P2ALIGN((uintptr_t)addr,
-		    align_size);
-		const ulong_t idx = btop(vmsm->vmsm_offset +
-		    (align_addr - vmsm->vmsm_addr));
-		cred_t *cr = CRED();
+		pfn_t pfn;
+		uintptr_t map_addr;
+		uint_t map_lvl;
 
-		VERIFY(seg->s_ops == &segvn_ops);
-		svd = (struct segvn_data *)seg->s_data;
-		VERIFY(svd->amp == amp);
-		prot = svd->prot;
+		/* XXXJOY: punt on large pages for now */
+		pfn = vm_mapping_page(vmsm, addr, NULL, NULL);
+		map_lvl = 0;
+		map_addr = P2ALIGN((uintptr_t)addr, LEVEL_SIZE(map_lvl));
+		VERIFY(pfn != PFN_INVALID);
 
 		/*
-		 * This conveniently grabs an SE_SHARED lock on all the pages
-		 * in question.
+		 * If pmap failure is to be handled, the previously
+		 * acquired page locks would need to be released.
 		 */
-		err = anon_map_createpages(amp, idx, align_size, pp, seg,
-		    align_addr, S_CREATE, cr);
-		if (err == 0) {
-			/*
-			 * If pmap failure is to be handled, the previously
-			 * acquired page locks would need to be released.
-			 */
-			VERIFY0(vmspace_pmap_wire(vms, align_addr, align_size,
-			    pp, prot));
-		}
+		VERIFY0(vmspace_pmap_wire(vms, map_addr, pfn, map_lvl, prot));
 	}
 		break;
 	default:
@@ -913,7 +931,6 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 		break;
 	}
 
-	AS_LOCK_EXIT(as);
 	mutex_exit(&vms->vms_lock);
 	return (0);
 }
@@ -923,41 +940,30 @@ vm_fault_quick_hold_pages(vm_map_t map, vm_offset_t addr, vm_size_t len,
     vm_prot_t prot, vm_page_t *ma, int max_count)
 {
 	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
-	struct as *as = vms->vms_as;
-	const caddr_t vaddr = (caddr_t)addr;
-	pfn_t pfn;
-	uint_t pprot;
-	page_t *pp = NULL;
+	const uintptr_t vaddr = addr;
+	vmspace_mapping_t *vmsm;
+	vm_page_t vmp;
 
+	ASSERT0(addr & PAGEOFFSET);
 	ASSERT(len == PAGESIZE);
 	ASSERT(max_count == 1);
 
 	mutex_enter(&vms->vms_lock);
-	/* Must be within the bounds of the vmspace */
-	if (addr >= vms->vms_size) {
+	if ((vmsm = vm_mapping_find(vms, vaddr, PAGESIZE)) == NULL ||
+	    (prot & ~vmsm->vmsm_prot) != 0) {
 		mutex_exit(&vms->vms_lock);
 		return (-1);
 	}
 
-	AS_LOCK_ENTER(as, RW_READER);
-	pfn = hat_getpfnum(as->a_hat, vaddr);
-	if (pf_is_memory(pfn) && hat_getattr(as->a_hat, vaddr, &pprot) == 0) {
-		/* The page is expected to be share-locked already */
-		pp = page_numtopp_nolock(pfn);
-		if (pp == NULL || (prot & ~pprot) == 0 ||
-		    page_lock(pp, SE_SHARED, (kmutex_t *)NULL,
-		    P_RECLAIM) == 0) {
-			pp = NULL;
-		}
-	}
-	AS_LOCK_EXIT(as);
-	mutex_exit(&vms->vms_lock);
+	vmp = kmem_zalloc(sizeof (struct vm_page), KM_SLEEP);
 
-	if (pp != NULL) {
-		*ma = (vm_page_t)pp;
-		return (0);
-	}
-	return (-1);
+	vmp->vmp_obj_held = vmsm->vmsm_object;
+	vmp->vmp_pfn = vm_mapping_page(vmsm, vaddr, NULL, NULL);
+	vm_object_reference(vmp->vmp_obj_held);
+
+	mutex_exit(&vms->vms_lock);
+	*ma = vmp;
+	return (1);
 }
 
 /*
@@ -969,67 +975,48 @@ vm_map_find(vm_map_t map, vm_object_t vmo, vm_ooffset_t off, vm_offset_t *addr,
     vm_prot_t prot_max, int cow)
 {
 	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
-	struct as *as = vms->vms_as;
 #if notyet
 	const size_t slen = (size_t)len;
 #endif
-	caddr_t base = (caddr_t)*addr;
-	size_t maxlen;
-	struct segvn_crargs svna;
+	uintptr_t base = *addr;
 	vmspace_mapping_t *vmsm;
-	int res;
+	int res = 0;
 
 	/* For use in vmm only */
 	VERIFY(find_flags == VMFS_NO_SPACE); /* essentially MAP_FIXED */
+	VERIFY(max_addr == 0);
 	VERIFY(vmo->vmo_type == OBJT_DEFAULT); /* only anon for now */
 
 	if (len == 0 || off >= (off + len) || vmo->vmo_size < (off + len)) {
 		return (EINVAL);
 	}
 
-	maxlen = (max_addr != 0) ? max_addr : vms->vms_size;
-	if (*addr >= maxlen) {
+	if (*addr >= vms->vms_size) {
 		return (ENOMEM);
-	} else {
-		maxlen -= *addr;
 	}
 
 	vmsm = kmem_alloc(sizeof (*vmsm), KM_SLEEP);
 
 	mutex_enter(&vms->vms_lock);
-	as_rangelock(as);
-	if (as_gap(as, len, &base, &maxlen, AH_LO, NULL) != 0) {
+	if (!vm_mapping_gap(vms, base, len)) {
 		res = ENOMEM;
 		goto out;
 	}
 
 	/* XXX: verify offset/len fits in object */
 
-	svna.vp = NULL;
-	svna.offset = (off_t)off;
-	svna.type = MAP_SHARED;
-	svna.prot = (prot & VM_PROT_ALL) | PROT_USER;
-	svna.maxprot = (prot_max & VM_PROT_ALL) | PROT_USER;
-	svna.flags = MAP_ANON;
-	svna.cred = CRED(); /* XXXJOY: really? */
-	svna.amp = vmo->vmo_amp;
-	svna.szc = 0;
-	svna.lgrp_mem_policy_flags = 0;
-
-	res = as_map(as, base, len, segvn_create, &svna);
-
 	if (res == 0) {
 		vmsm->vmsm_object = vmo;
 		vmsm->vmsm_addr = base;
 		vmsm->vmsm_len = len;
 		vmsm->vmsm_offset = (off_t)off;
+		vmsm->vmsm_prot = prot;
 		list_insert_tail(&vms->vms_maplist, vmsm);
 
 		/* Communicate out the chosen address. */
 		*addr = (vm_offset_t)base;
 	}
 out:
-	as_rangeunlock(as);
 	mutex_exit(&vms->vms_lock);
 	if (res != 0) {
 		kmem_free(vmsm, sizeof (*vmsm));
@@ -1037,48 +1024,11 @@ out:
 	return (res);
 }
 
-static vmspace_mapping_t *
-vm_mapping_find(struct vmspace *vms, caddr_t addr, size_t size)
-{
-	vmspace_mapping_t *vmsm;
-	list_t *ml = &vms->vms_maplist;
-
-	ASSERT(MUTEX_HELD(&vms->vms_lock));
-
-	for (vmsm = list_head(ml); vmsm != NULL; vmsm = list_next(ml, vmsm)) {
-		if (addr >= vmsm->vmsm_addr &&
-		    addr < (vmsm->vmsm_addr + vmsm->vmsm_len)) {
-			break;
-		}
-	}
-
-	/* If size is specified, both length and address must match exactly */
-	if (size != 0) {
-		if (vmsm->vmsm_len != size || vmsm->vmsm_addr != addr) {
-			vmsm = NULL;
-		}
-	}
-
-	return (vmsm);
-}
-
-static void
-vm_mapping_remove(struct vmspace *vms, vmspace_mapping_t *vmsm)
-{
-	list_t *ml = &vms->vms_maplist;
-
-	ASSERT(MUTEX_HELD(&vms->vms_lock));
-
-	list_remove(ml, vmsm);
-	vm_object_release(vmsm->vmsm_object);
-	kmem_free(vmsm, sizeof (*vmsm));
-}
-
 int
 vm_map_remove(vm_map_t map, vm_offset_t start, vm_offset_t end)
 {
 	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
-	const caddr_t addr = (caddr_t)start;
+	const uintptr_t addr = start;
 	const size_t size = (size_t)(end - start);
 	vmspace_mapping_t *vmsm;
 	objtype_t type;
@@ -1087,15 +1037,11 @@ vm_map_remove(vm_map_t map, vm_offset_t start, vm_offset_t end)
 	ASSERT(start < end);
 
 	mutex_enter(&vms->vms_lock);
-	if ((vmsm = vm_mapping_find(vms, addr, size)) == NULL) {
+	/* expect to match existing mapping exactly */
+	if ((vmsm = vm_mapping_find(vms, addr, size)) == NULL ||
+	    vmsm->vmsm_addr != addr || vmsm->vmsm_len != size) {
 		mutex_exit(&vms->vms_lock);
 		return (ENOENT);
-	}
-
-	err = as_unmap(vms->vms_as, addr, size);
-	if (err != 0) {
-		mutex_exit(&vms->vms_lock);
-		return (err);
 	}
 
 	type = vmsm->vmsm_object->vmo_type;
@@ -1118,163 +1064,90 @@ vm_map_remove(vm_map_t map, vm_offset_t start, vm_offset_t end)
 int
 vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end, int flags)
 {
-	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
-	const caddr_t addr = (caddr_t)start;
-	const size_t size = (size_t)(end - start);
-	vmspace_mapping_t *vmsm;
-	struct as *as;
-	struct seg *seg;
-	cred_t *cr = CRED();
-	objtype_t type;
+	/* XXXJOY: punt on wiring for now */
+	return (-1);
+}
+
+/* Provided custom for bhyve 'devmem' segment mapping */
+int
+vm_segmap_obj(struct vmspace *vms, vm_object_t vmo, struct as *as,
+    caddr_t *addrp, uint_t prot, uint_t maxprot, uint_t flags)
+{
+	const size_t size = vmo->vmo_size;
 	int err;
 
-	if (((uintptr_t)addr & PAGEOFFSET) != 0 ||
-	    (size & PAGEOFFSET) != 0 ||
-	    size < PAGESIZE) {
+	as_rangelock(as);
+
+	err = choose_addr(as, addrp, size, 0, ADDR_VACALIGN, flags);
+	if (err == 0) {
+		segvmm_crargs_t svma;
+
+		svma.kaddr = vmo->vmo_kmem;
+		svma.prot = prot;
+		svma.maxprot = maxprot;
+		svma.cookie = vmo;
+		svma.hold = (segvmm_holdfn_t)vm_object_reference;
+		svma.rele = (segvmm_relefn_t)vm_object_deallocate;
+
+		err = as_map(as, *addrp, size, segvmm_create, &svma);
+	}
+
+	as_rangeunlock(as);
+	return (err);
+}
+
+int
+vm_segmap_space(struct vmspace *vms, off_t off, struct as *as, caddr_t *addrp,
+    off_t len, uint_t prot, uint_t maxprot, uint_t flags)
+{
+	const uintptr_t addr = (uintptr_t)off;
+	const size_t size = (uintptr_t)len;
+	vmspace_mapping_t *vmsm;
+	vm_object_t vmo;
+	int err;
+
+	if (off < 0 || len <= 0 ||
+	    (addr & PAGEOFFSET) != 0 || (size & PAGEOFFSET) != 0) {
 		return (EINVAL);
 	}
 
 	mutex_enter(&vms->vms_lock);
 	if ((vmsm = vm_mapping_find(vms, addr, size)) == NULL) {
 		mutex_exit(&vms->vms_lock);
-		return (ENOENT);
+		return (ENXIO);
 	}
-	type = vmsm->vmsm_object->vmo_type;
-	as = vms->vms_as;
-
-	AS_LOCK_ENTER(as, RW_READER);
-	VERIFY(seg = as_segat(as, addr));
-
-	switch (type) {
-	case OBJT_DEFAULT: {
-		struct anon_map *amp = vmsm->vmsm_object->vmo_amp;
-		struct segvn_data *svd;
-		const ulong_t idx = btop(vmsm->vmsm_offset);
-		const size_t arr_sz = sizeof (page_t *) * btop(size);
-		page_t **pp;
-		uint_t prot;
-
-		VERIFY(seg->s_ops == &segvn_ops);
-		svd = (struct segvn_data *)seg->s_data;
-		VERIFY(svd->amp == amp);
-		prot = svd->prot;
-
-		pp = kmem_alloc(arr_sz, KM_SLEEP);
-		/*
-		 * This conveniently grabs an SE_SHARED lock on all the pages
-		 * in question.
-		 */
-		err = anon_map_createpages(amp, idx, size, pp, seg, addr,
-		    S_CREATE, cr);
-		if (err == 0) {
-			/*
-			 * If pmap failure is to be handled, the previously
-			 * acquired page locks would need to be released.
-			 */
-			VERIFY0(vmspace_pmap_wire(vms, addr, size, pp, prot));
-		}
-		kmem_free(pp, arr_sz);
-	}
-		break;
-	default:
-		panic("unsupported object type: %x", type);
-		/* NOTREACHED */
-		break;
-	}
-
-	AS_LOCK_EXIT(as);
-	mutex_exit(&vms->vms_lock);
-
-	return (err);
-}
-
-int
-vm_map_user(struct vmspace *vms, off_t off, struct as *as, caddr_t *addrp,
-    off_t len, uint_t prot, uint_t maxprot, uint_t flags, cred_t *cr)
-{
-	int err = 0;
-	const caddr_t poff = (caddr_t)(uintptr_t)off;
-	const size_t size = (size_t)len;
-	vmspace_mapping_t *vmsm;
-	vm_object_t vmo;
-
-	if (off < 0 || len <= 0) {
-		return (EINVAL);
-	}
-
-	mutex_enter(&vms->vms_lock);
-
-	if ((vmsm = vm_mapping_find(vms, poff, size)) == NULL) {
+	if ((prot & ~(vmsm->vmsm_prot | PROT_USER)) != 0) {
 		mutex_exit(&vms->vms_lock);
-		return (ENOENT);
+		return (EACCES);
 	}
 	vmo = vmsm->vmsm_object;
 	if (vmo->vmo_type != OBJT_DEFAULT) {
-		/* Only support sysmem for now */
+		/* Only support default objects for now */
 		mutex_exit(&vms->vms_lock);
-		return (ENODEV);
+		return (ENOTSUP);
 	}
 
-	ASSERT(as != vms->vms_as);
 	as_rangelock(as);
 
-	err = choose_addr(as, addrp, len, off, ADDR_VACALIGN, flags);
+	err = choose_addr(as, addrp, size, off, ADDR_VACALIGN, flags);
 	if (err == 0) {
-		struct segvn_crargs svna;
+		segvmm_crargs_t svma;
+		const uintptr_t addroff = addr - vmsm->vmsm_addr;
+		const uintptr_t mapoff = addroff + vmsm->vmsm_offset;
 
-		ASSERT(off >= vmsm->vmsm_offset);
+		VERIFY(addroff < vmsm->vmsm_len);
+		VERIFY((vmsm->vmsm_len - addroff) >= size);
+		VERIFY(mapoff < vmo->vmo_size);
+		VERIFY((mapoff + size) <= vmo->vmo_size);
 
-		svna.vp = NULL;
-		svna.offset = (off - vmsm->vmsm_offset);
-		svna.type = MAP_SHARED;
-		svna.prot = prot;
-		svna.maxprot = maxprot;
-		svna.flags = MAP_ANON;
-		svna.cred = cr;
-		svna.amp = vmo->vmo_amp;
-		svna.szc = 0;
-		svna.lgrp_mem_policy_flags = 0;
+		svma.kaddr = vmo->vmo_kmem + mapoff;
+		svma.prot = prot;
+		svma.maxprot = maxprot;
+		svma.cookie = vmo;
+		svma.hold = (segvmm_holdfn_t)vm_object_reference;
+		svma.rele = (segvmm_relefn_t)vm_object_deallocate;
 
-		err = as_map(as, *addrp, size, segvn_create, &svna);
-	}
-
-	as_rangeunlock(as);
-	mutex_exit(&vms->vms_lock);
-	return (err);
-}
-
-/* Provided custom for 'devmem' segment mapping */
-int
-vm_map_user_obj(struct vmspace *vms, vm_object_t vmo, struct as *as,
-    caddr_t *addrp, uint_t prot, uint_t maxprot, uint_t flags, cred_t *cr)
-{
-	size_t len = vmo->vmo_size;
-	off_t off = 0;
-	int err;
-
-	if (vmo->vmo_type != OBJT_DEFAULT) {
-		return (ENODEV);
-	}
-
-	mutex_enter(&vms->vms_lock);
-	as_rangelock(as);
-
-	err = choose_addr(as, addrp, len, off, ADDR_VACALIGN, flags);
-	if (err == 0) {
-		struct segvn_crargs svna;
-
-		svna.vp = NULL;
-		svna.offset = off;
-		svna.type = MAP_SHARED;
-		svna.prot = prot;
-		svna.maxprot = maxprot;
-		svna.flags = MAP_ANON;
-		svna.cred = cr;
-		svna.amp = vmo->vmo_amp;
-		svna.szc = 0;
-		svna.lgrp_mem_policy_flags = 0;
-
-		err = as_map(as, *addrp, len, segvn_create, &svna);
+		err = as_map(as, *addrp, len, segvmm_create, &svma);
 	}
 
 	as_rangeunlock(as);
@@ -1285,21 +1158,33 @@ vm_map_user_obj(struct vmspace *vms, vm_object_t vmo, struct as *as,
 void
 vm_page_lock(vm_page_t vmp)
 {
-	/*EMPTY*/
+	ASSERT(!MUTEX_HELD(&vmp->vmp_lock));
+
+	mutex_enter(&vmp->vmp_lock);
 }
 
 void
 vm_page_unlock(vm_page_t vmp)
 {
-	/*EMPTY*/
+	boolean_t purge = (vmp->vmp_pfn == PFN_INVALID);
+
+	ASSERT(MUTEX_HELD(&vmp->vmp_lock));
+
+	mutex_exit(&vmp->vmp_lock);
+
+	if (purge) {
+		mutex_destroy(&vmp->vmp_lock);
+		kmem_free(vmp, sizeof (*vmp));
+	}
 }
 
 void
 vm_page_unhold(vm_page_t vmp)
 {
-	page_t *pp = (page_t *)vmp;
+	ASSERT(MUTEX_HELD(&vmp->vmp_lock));
+	VERIFY(vmp->vmp_pfn != PFN_INVALID);
 
-	ASSERT(PAGE_SHARED(pp));
-
-	page_unlock(pp);
+	vm_object_deallocate(vmp->vmp_obj_held);
+	vmp->vmp_obj_held = NULL;
+	vmp->vmp_pfn = PFN_INVALID;
 }

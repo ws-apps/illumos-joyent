@@ -36,6 +36,7 @@
 #include "io/vhpet.h"
 #include "vmm_lapic.h"
 #include "vmm_stat.h"
+#include "vm/vm_glue.h"
 
 static dev_info_t *vmm_dip;
 static void *vmm_statep;
@@ -299,29 +300,27 @@ vmmdev_devmem_create(vmm_softc_t *sc, struct vm_memseg *mseg, const char *name)
 	return (0);
 }
 
-static int
-vmmdev_devmem_map(vmm_softc_t *sc, off_t off, struct as *as, caddr_t *addrp,
-    off_t len, unsigned int prot, unsigned int maxprot, unsigned int flags,
-    cred_t *cr)
+static boolean_t
+vmmdev_devmem_segid(vmm_softc_t *sc, off_t off, off_t len, int *segidp)
 {
 	list_t *dl = &sc->vmm_devmem_list;
 	vmm_devmem_entry_t *de = NULL;
+	int err;
 
 	VERIFY(off >= VM_DEVMEM_START);
 
 	for (de = list_head(dl); de != NULL; de = list_next(dl, de)) {
-		/* Only hit on direct offset/length matches for now */
+		/* XXX: Only hit on direct offset/length matches for now */
 		if (de->vde_off == off && de->vde_len == len) {
 			break;
 		}
 	}
 	if (de == NULL) {
-		return (ENODEV);
+		return (B_FALSE);
 	}
 
-	/* When a matching "device" is found, attempt to map the whole thing */
-	return (vm_do_segmap_segid(sc->vmm_vm, de->vde_segid, as, addrp, prot,
-	    maxprot, flags, cr));
+	*segidp = de->vde_segid;
+	return (B_TRUE);
 }
 
 static void
@@ -1306,15 +1305,21 @@ static int
 vmm_segmap(dev_t dev, off_t off, struct as *as, caddr_t *addrp, off_t len,
     unsigned int prot, unsigned int maxprot, unsigned int flags, cred_t *credp)
 {
-	vmm_softc_t	*sc;
-	const minor_t	minor = getminor(dev);
+	vmm_softc_t *sc;
+	const minor_t minor = getminor(dev);
+	struct vm *vm;
 	int err;
+	vm_object_t vmo = NULL;
+	struct vmspace *vms;
 
 	if (minor == VMM_CTL_MINOR) {
 		return (ENODEV);
 	}
 	if (off < 0 || (off + len) <= 0) {
 		return (EINVAL);
+	}
+	if ((prot & PROT_USER) == 0) {
+		return (EACCES);
 	}
 
 	sc = ddi_get_soft_state(vmm_statep, minor);
@@ -1325,16 +1330,29 @@ vmm_segmap(dev_t dev, off_t off, struct as *as, caddr_t *addrp, off_t len,
 		return (err);
 	}
 
+	vm = sc->vmm_vm;
+	vms = vm_get_vmspace(vm);
 	if (off >= VM_DEVMEM_START) {
+		int segid;
+
 		/* Mapping a devmem "device" */
-		err = vmmdev_devmem_map(sc, off, as, addrp, len, prot, maxprot,
-		    flags, credp);
+		if (!vmmdev_devmem_segid(sc, off, len, &segid)) {
+			err = ENODEV;
+			goto out;
+		}
+		err = vm_get_memseg(vm, segid, NULL, NULL, &vmo);
+		if (err != 0) {
+			goto out;
+		}
+		err = vm_segmap_obj(vms, vmo, as, addrp, prot, maxprot, flags);
 	} else {
 		/* Mapping a part of the guest physical space */
-		err = vm_do_segmap(sc->vmm_vm, off, as, addrp, len, prot,
-		    maxprot, flags, credp);
+		err = vm_segmap_space(vms, off, as, addrp, len, prot, maxprot,
+		    flags);
 	}
 
+
+out:
 	vcpu_unlock_all(sc);
 	return (err);
 }
@@ -1363,6 +1381,9 @@ vmm_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	ddi_report_dev(dip);
 
+	/* XXX: This needs updating */
+	vmm_arena_init();
+
 	return (DDI_SUCCESS);
 }
 
@@ -1383,6 +1404,11 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 	mutex_exit(&vmmdev_mtx);
+
+	/* XXX: This needs updating */
+	if (!vmm_arena_fini()) {
+		return (DDI_FAILURE);
+	}
 
 	/* Remove the control node. */
 	ddi_remove_minor_node(dip, VMM_CTL_MINOR_NODE);

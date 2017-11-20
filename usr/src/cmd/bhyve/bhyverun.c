@@ -1033,7 +1033,9 @@ main(int argc, char *argv[])
 
 #if notyet
 	console_init();
-	vga_init();
+#endif
+	vga_init(1);
+#if notyet
 	if (rfb_port != -1)
 		rfb_init(rfb_port);
 #endif

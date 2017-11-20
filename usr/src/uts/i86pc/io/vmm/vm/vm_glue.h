@@ -44,7 +44,6 @@ struct vmspace {
 	/* Implementation private */
 	kmutex_t	vms_lock;
 	struct pmap	vms_pmap;
-	struct as	*vms_as;
 	uintptr_t	vms_size;	/* fixed after creation */
 
 	list_t		vms_maplist;
@@ -55,12 +54,21 @@ struct vm_object {
 	uint_t		vmo_refcnt;
 	objtype_t	vmo_type;
 	size_t		vmo_size;
-	struct anon_map	*vmo_amp;
+	void		*vmo_kmem;
 };
 
-int vm_map_user(struct vmspace *, off_t, struct as *, caddr_t *, off_t, uint_t,
-    uint_t, uint_t, cred_t *);
-int vm_map_user_obj(struct vmspace *, vm_object_t, struct as *, caddr_t *,
-    uint_t, uint_t, uint_t, cred_t *);
+struct vm_page {
+	kmutex_t		vmp_lock;
+	pfn_t			vmp_pfn;
+	struct vm_object	*vmp_obj_held;
+};
+
+/* Illumos-specific functions for setup and operation */
+int vm_segmap_obj(struct vmspace *, vm_object_t, struct as *, caddr_t *,
+    uint_t, uint_t, uint_t);
+int vm_segmap_space(struct vmspace *, off_t , struct as *, caddr_t *, off_t,
+    uint_t, uint_t, uint_t);
+void vmm_arena_init(void);
+boolean_t vmm_arena_fini(void);
 
 #endif /* _VM_GLUE_ */
