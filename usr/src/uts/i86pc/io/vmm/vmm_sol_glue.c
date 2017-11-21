@@ -407,19 +407,16 @@ vmm_glue_callout_drain(struct callout *c)
 	return (0);
 }
 
-static int
-ipi_cpu_justreturn(xc_arg_t a1, xc_arg_t a2, xc_arg_t a3)
-{
-	return (0);
-}
-
 void
 ipi_cpu(int cpu, u_int ipi)
 {
-	cpuset_t	set;
-
-	CPUSET_ONLY(set, cpu);
-	xc_call_nowait(NULL, NULL, NULL, CPUSET2BV(set), ipi_cpu_justreturn);
+	/*
+	 * This was previously implemented as an invocation of asynchronous
+	 * no-op crosscalls to interrupt the target CPU.  Since even nowait
+	 * crosscalls can block in certain circumstances, a direct poke_cpu()
+	 * is safer when called from delicate contexts.
+	 */
+	poke_cpu(cpu);
 }
 
 #define	SC_TABLESIZE	256			/* Must be power of 2. */
