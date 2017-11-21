@@ -21,6 +21,14 @@
 #define	__has_feature(x)	0
 #endif
 
+#if defined(__cplusplus)
+#define __BEGIN_DECLS   extern "C" {
+#define __END_DECLS     }
+#else
+#define __BEGIN_DECLS
+#define __END_DECLS
+#endif
+
 /*
  * Macro to test if we're using a specific version of gcc or later.
  */

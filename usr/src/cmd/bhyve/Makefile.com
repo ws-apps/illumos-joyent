@@ -59,13 +59,17 @@ SRCS =	acpi.c			\
 
 OBJS = $(SRCS:.c=.o)
 
+TESTPROG = mevent_test
+TESTSRCS = mevent_test.c mevent.c kqueue.c
+TESTOBJS = $(TESTSRCS:.c=.o)
+
 include ../../Makefile.cmd
 include ../../Makefile.ctf
 
 .KEEP_STATE:
 
-CFLAGS +=	$(CCVERBOSE) -_gcc=-Wimplicit-function-declaration -_gcc=-Wno-parentheses
-CFLAGS64 +=	$(CCVERBOSE) -_gcc=-Wimplicit-function-declaration -_gcc=-Wno-parentheses
+CFLAGS +=	$(CCVERBOSE) -xO0 -_gcc=-Wimplicit-function-declaration -_gcc=-Wno-parentheses
+CFLAGS64 +=	$(CCVERBOSE) -xO0 -_gcc=-Wimplicit-function-declaration -_gcc=-Wno-parentheses
 CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
 		-I$(CONTRIB)/freebsd/dev/usb/controller \
 		-I$(CONTRIB)/freebsd/dev/mii \
@@ -81,11 +85,14 @@ LDLIBS +=	-lsocket -lnsl -ldlpi -ldladm -lkstat -lmd -luuid -lvmmapi -lz
 
 POST_PROCESS += ; $(GENSETDEFS) $@
 
-all: $(PROG)
+all: $(PROG) $(TESTPROG)
 
 $(PROG): $(OBJS)
 	$(LINK.c) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 	$(POST_PROCESS)
+
+$(TESTPROG): $(TESTOBJS)
+	$(LINK.c) -o $@ $(TESTOBJS) $(LDFLAGS) -lpthread -lsocket
 
 install: all $(ROOTUSRSBINPROG)
 

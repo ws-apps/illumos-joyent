@@ -35,10 +35,16 @@
 
 #include <sys/types.h>
 #include <sys/stdint.h>
+#ifdef __FreeBSD__
 #include <sys/sysctl.h>
+#endif
 #include <sys/socket.h>
 #include <netinet/in.h>
+#ifdef __FreeBSD__
 #include <machine/cpufunc.h>
+#else
+#include <sys/time.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,7 +81,11 @@ timer_print(void)
 	sum = 0;
 
 	len = sizeof(tsc_freq);
+#ifdef __FreeBSD__
 	sysctlbyname("machdep.tsc_freq", &tsc_freq, &len, NULL, 0);
+#else
+	tsc_freq = 1000000000ULL;
+#endif
 
 	for (j = 1; j < TEVSZ; j++) {
 		/* Convert a tsc diff into microseconds */
@@ -99,7 +109,11 @@ timer_callback(int fd, enum ev_type type, void *param)
 	if (i >= TEVSZ)
 		abort();
 
+#ifdef __FreeBSD__
 	tevbuf[i++] = rdtsc();
+#else
+	tevbuf[i++] = gethrtime();
+#endif
 
 	if (i == TEVSZ) {
 		mevent_delete(tevp);
@@ -195,14 +209,18 @@ acceptor(void *param)
 	pthread_t tid;
 	int news;
 	int s;
+#if notyet
 	static int first;
+#endif
 
         if ((s = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
                 perror("socket");
                 exit(1);
         }
 
+#ifdef __FreeBSD__
         sin.sin_len = sizeof(sin);
+#endif
         sin.sin_family = AF_INET;
         sin.sin_addr.s_addr = htonl(INADDR_ANY);
         sin.sin_port = htons(TEST_PORT);
@@ -246,11 +264,14 @@ acceptor(void *param)
 	return (NULL);
 }
 
-main()
+int
+main(int argc, char **argv)
 {
 	pthread_t tid;
 
 	pthread_create(&tid, NULL, acceptor, NULL);
 
 	mevent_dispatch();
+
+	return (0);
 }

@@ -42,6 +42,7 @@ __FBSDID("$FreeBSD$");
 #include <string.h>
 #include <sysexits.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <sys/types.h>
 #ifndef WITHOUT_CAPSICUM
@@ -150,7 +151,7 @@ mevent_kq_filter(struct mevent *mevp)
 static int
 mevent_kq_flags(struct mevent *mevp)
 {
-	int ret;
+	int ret = 0;
 
 	switch (mevp->me_state) {
 	case MEV_ADD:
@@ -192,6 +193,8 @@ mevent_build(int mfd, struct kevent *kev)
 
 	LIST_FOREACH_SAFE(mevp, &change_head, me_list, tmpp) {
 		if (mevp->me_closefd) {
+			fprintf(stderr, "mevent_build: found in change list, "
+			    "closing fd %d\n", mevp->me_fd);
 			/*
 			 * A close of the file descriptor will remove the
 			 * event
@@ -209,6 +212,8 @@ mevent_build(int mfd, struct kevent *kev)
 			kev[i].flags = mevent_kq_flags(mevp);
 			kev[i].fflags = mevent_kq_fflags(mevp);
 			kev[i].udata = mevp;
+			fprintf(stderr, "mevent_build: found in change list %d/%d\n",
+			    mevp->me_fd, mevp->me_type);
 			i++;
 		}
 
@@ -225,7 +230,7 @@ mevent_build(int mfd, struct kevent *kev)
 	}
 
 	mevent_qunlock();
-
+	fprintf(stderr, "mevent_build: built %d entries\n", i);
 	return (i);
 }
 
@@ -239,7 +244,11 @@ mevent_handle(struct kevent *kev, int numev)
 		mevp = kev[i].udata;
 
 		/* XXX check for EV_ERROR ? */
-
+		fprintf(stderr, "mevent_handle: %"PRId64", %d, %d, %d, %"PRIx64
+		    ", %p\n", kev->ident, kev->filter, kev->flags, kev->fflags,
+		    kev->data, kev->udata);
+		fprintf(stderr, "mevent_handle: (%p)(%d, %d, %p)\n",
+		    mevp->me_func, mevp->me_fd, mevp->me_type, mevp->me_param);
 		(*mevp->me_func)(mevp->me_fd, mevp->me_type, mevp->me_param);
 	}
 }
@@ -264,6 +273,8 @@ mevent_add(int tfd, enum ev_type type,
 	LIST_FOREACH(lp, &global_head, me_list) {
 		if (type != EVF_TIMER && lp->me_fd == tfd &&
 		    lp->me_type == type) {
+			fprintf(stderr, "mevent_add: %d/%d already in global list\n",
+			    tfd, type);
 			goto exit;
 		}
 	}
@@ -271,6 +282,8 @@ mevent_add(int tfd, enum ev_type type,
 	LIST_FOREACH(lp, &change_head, me_list) {
 		if (type != EVF_TIMER && lp->me_fd == tfd &&
 		    lp->me_type == type) {
+			fprintf(stderr, "mevent_add: %d/%d already in change list\n",
+			    tfd, type);
 			goto exit;
 		}
 	}
@@ -295,6 +308,9 @@ mevent_add(int tfd, enum ev_type type,
 	LIST_INSERT_HEAD(&change_head, mevp, me_list);
 	mevp->me_cq = 1;
 	mevp->me_state = MEV_ADD;
+	fprintf(stderr, "mevent_add: %d/%d added to change list\n",
+	    tfd, type);
+	fprintf(stderr, "mevent_add: notifying\n");
 	mevent_notify();
 
 exit:
@@ -329,6 +345,7 @@ mevent_update(struct mevent *evp, int newstate)
 		evp->me_cq = 1;
 		LIST_REMOVE(evp, me_list);
 		LIST_INSERT_HEAD(&change_head, evp, me_list);
+		fprintf(stderr, "mevent_update: notifying\n");
 		mevent_notify();
 	}
 
@@ -364,6 +381,7 @@ mevent_delete_event(struct mevent *evp, int closefd)
 		evp->me_cq = 1;
 		LIST_REMOVE(evp, me_list);
 		LIST_INSERT_HEAD(&change_head, evp, me_list);
+		fprintf(stderr, "mevent_delete_event: notifying\n");
 		mevent_notify();
         }
 	evp->me_state = MEV_DEL_PENDING;
