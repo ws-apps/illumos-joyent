@@ -60,6 +60,7 @@ SRCS =	acpi.c			\
 OBJS = $(SRCS:.c=.o)
 
 include ../../Makefile.cmd
+include ../../Makefile.ctf
 
 .KEEP_STATE:
 
