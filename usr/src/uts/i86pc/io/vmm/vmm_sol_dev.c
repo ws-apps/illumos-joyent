@@ -648,6 +648,7 @@ vmmdev_do_ioctl(vmm_softc_t *sc, int cmd, intptr_t arg, int md,
 			break;
 		}
 		error = lapic_intr_msi(sc->vmm_vm, vmmsi.addr, vmmsi.msg);
+		break;
 	case VM_IOAPIC_ASSERT_IRQ:
 		if (ddi_copyin(datap, &ioapic_irq, sizeof (ioapic_irq), md)) {
 			error = EFAULT;
