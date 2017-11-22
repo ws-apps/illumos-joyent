@@ -841,8 +841,9 @@ static pfn_t
 vm_mapping_page(vmspace_mapping_t *vmsm, uintptr_t vaddr, pfn_t *lpfn,
     uint_t *lvl)
 {
-	const uintptr_t off = (vaddr - (uintptr_t)vmsm->vmsm_addr);
-	const uintptr_t kaddr = (uintptr_t)vmsm->vmsm_object->vmo_kmem + off;
+	const uintptr_t mapoff = (vaddr - (uintptr_t)vmsm->vmsm_addr);
+	const uintptr_t kaddr = (uintptr_t)vmsm->vmsm_object->vmo_kmem +
+	    vmsm->vmsm_offset + mapoff;
 	uint_t idx, level;
 	htable_t *ht;
 	x86pte_t pte;
@@ -884,18 +885,25 @@ vm_fault(vm_map_t map, vm_offset_t off, vm_prot_t type, int flag)
 	const uintptr_t addr = off;
 	vmspace_mapping_t *vmsm;
 	uint_t prot;
-	int err = 0;
 
 	mutex_enter(&vms->vms_lock);
-
 	if (vmspace_pmap_iswired(vms, addr, &prot) == 0) {
-		/* The page is wired up, perhaps the prot is wrong? */
+		int err = 0;
+
+		/*
+		 * It is possible that multiple will vCPUs race to fault-in a
+		 * given address.  In such cases, the race loser(s) will
+		 * encounter the already-mapped page, needing to do nothing
+		 * more than consider it a success.
+		 *
+		 * If the fault exceeds protection, it is an obvious error.
+		 */
 		if ((prot & type) != type) {
-			mutex_exit(&vms->vms_lock);
-			return (FC_PROT);
+			err = FC_PROT;
 		}
-		panic("unexpected vm_fault %p %x %x", addr, type, prot);
-		/*NOTREACHED*/
+
+		mutex_exit(&vms->vms_lock);
+		return (err);
 	}
 
 	/* Try to wire up the address */
