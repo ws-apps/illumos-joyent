@@ -266,7 +266,7 @@ VMM_OBJS += vmm.o \
 	vmcb.o \
 	svm_support.o \
 	amdv.o \
-	sol_iommu.o \
+	iommu.o \
 	sol_ppt.o \
 	vmm_sol_vm.o \
 	vmm_sol_glue.o
