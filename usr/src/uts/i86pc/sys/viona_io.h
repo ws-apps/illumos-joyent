@@ -27,9 +27,7 @@
 
 typedef struct vioc_create {
 	datalink_id_t	c_linkid;
-	char		c_vmname[64];
-	size_t		c_lomem_size;
-	size_t		c_himem_size;
+	int		c_vmfd;
 } vioc_create_t;
 
 typedef struct vioc_ring_init {

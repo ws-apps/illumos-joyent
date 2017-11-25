@@ -47,10 +47,8 @@
 #include <sys/dls.h>
 #include <sys/mac_client.h>
 
+#include <sys/vmm_drv.h>
 #include <sys/viona_io.h>
-
-#define	MB	(1024UL * 1024)
-#define	GB	(1024UL * MB)
 
 /*
  * Min. octets in an ethernet frame minus FCS
@@ -66,7 +64,10 @@
 
 #define	VTNET_MAXSEGS		32
 
+#define	VQ_MAX_DESCRIPTORS	512
+
 #define	VRING_ALIGN		4096
+#define	VRING_MAX_LEN		32768
 
 #define	VRING_DESC_F_NEXT	(1 << 0)
 #define	VRING_DESC_F_WRITE	(1 << 1)
@@ -87,6 +88,10 @@
 #define	VIONA_S_HOSTCAPS		\
 	(VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF | \
 	VIRTIO_NET_F_STATUS)
+
+
+#define	VIONA_PROBE_BAD_ADDR(addr)		\
+	DTRACE_PROBE1(viona__bad_addr, void *, (void *)(addr))
 
 #pragma pack(1)
 struct virtio_desc {
@@ -126,36 +131,33 @@ struct virtio_net_hdr {
 
 typedef struct viona_vring_hqueue {
 	/* Internal state */
-	uint16_t		hq_size;
 	kmutex_t		hq_a_mutex;
 	kmutex_t		hq_u_mutex;
+	uint16_t		hq_size;
 	uint16_t		hq_cur_aidx;	/* trails behind 'avail_idx' */
 
 	/* Host-context pointers to the queue */
-	caddr_t			hq_baseaddr;
-	uint16_t		*hq_avail_flags;
-	uint16_t		*hq_avail_idx;	/* monotonically increasing */
-	uint16_t		*hq_avail_ring;
+	volatile struct virtio_desc	*hq_descr;
 
-	uint16_t		*hq_used_flags;
-	uint16_t		*hq_used_idx;	/* monotonically increasing */
-	struct virtio_used	*hq_used_ring;
+	volatile uint16_t		*hq_avail_flags;
+	volatile uint16_t		*hq_avail_idx;
+	volatile uint16_t		*hq_avail_ring;
+	volatile uint16_t		*hq_avail_used_event;
+
+	volatile uint16_t		*hq_used_flags;
+	volatile uint16_t		*hq_used_idx;
+	volatile struct virtio_used	*hq_used_ring;
+	volatile uint16_t		*hq_used_avail_event;
 } viona_vring_hqueue_t;
 
 
 typedef struct viona_link {
 	datalink_id_t		l_linkid;
 
-	struct vm		*l_vm;
-	size_t			l_vm_lomemsize;
-	caddr_t			l_vm_lomemaddr;
-	size_t			l_vm_himemsize;
-	caddr_t			l_vm_himemaddr;
+	vmm_hold_t		*l_vm_hold;
 
 	mac_handle_t		l_mh;
 	mac_client_handle_t	l_mch;
-
-	kmem_cache_t		*l_desb_kmc;
 
 	pollhead_t		l_pollhead;
 
@@ -187,9 +189,11 @@ typedef struct used_elem {
 	uint32_t	len;
 } used_elem_t;
 
+
 static void			*viona_state;
 static dev_info_t		*viona_dip;
-static id_space_t		*viona_minor_ids;
+static id_space_t		*viona_minors;
+static kmem_cache_t		*viona_desb_cache;
 /*
  * copy tx mbufs from virtio ring to avoid necessitating a wait for packet
  * transmission to free resources.
@@ -208,17 +212,13 @@ static int viona_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 static int viona_chpoll(dev_t dev, short events, int anyyet, short *reventsp,
     struct pollhead **phpp);
 
-static int viona_ioc_create(viona_soft_state_t *ss, vioc_create_t *u_create);
+static int viona_ioc_create(viona_soft_state_t *, void *, int, cred_t *);
 static int viona_ioc_delete(viona_soft_state_t *ss);
 
-static int viona_vm_map(viona_link_t *link);
-static caddr_t viona_gpa2kva(viona_link_t *link, uint64_t gpa);
-static void viona_vm_unmap(viona_link_t *link);
+static void *viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len);
 
-static int viona_ioc_rx_ring_init(viona_link_t *link,
-    vioc_ring_init_t *u_ri);
-static int viona_ioc_tx_ring_init(viona_link_t *link,
-    vioc_ring_init_t *u_ri);
+static int viona_ioc_ring_init(viona_link_t *, viona_vring_hqueue_t *,
+    void *, int);
 static int viona_ioc_rx_ring_reset(viona_link_t *link);
 static int viona_ioc_tx_ring_reset(viona_link_t *link);
 static void viona_ioc_rx_ring_kick(viona_link_t *link);
@@ -317,6 +317,7 @@ static void
 set_viona_tx_mode()
 {
 	major_t bcm_nic_major;
+
 	if ((bcm_nic_major = ddi_name_to_major(BCM_NIC_DRIVER))
 	    != DDI_MAJOR_T_NONE) {
 		if (ddi_hold_installed_driver(bcm_nic_major) != NULL) {
@@ -333,13 +334,16 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	viona_minor_ids = id_space_create("viona_minor_id",
+	viona_minors = id_space_create("viona_minors",
 	    VIONA_CTL_MINOR + 1, UINT16_MAX);
 
 	if (ddi_create_minor_node(dip, VIONA_CTL_NODE_NAME,
 	    S_IFCHR, VIONA_CTL_MINOR, DDI_PSEUDO, 0) != DDI_SUCCESS) {
 		return (DDI_FAILURE);
 	}
+
+	viona_desb_cache = kmem_cache_create("viona_desb_cache",
+	    sizeof (viona_desb_t), 0, NULL, NULL, NULL, NULL, NULL, 0);
 
 	viona_dip = dip;
 
@@ -356,7 +360,9 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	id_space_destroy(viona_minor_ids);
+	kmem_cache_destroy(viona_desb_cache);
+
+	id_space_destroy(viona_minors);
 
 	ddi_remove_minor_node(viona_dip, NULL);
 
@@ -373,23 +379,21 @@ viona_open(dev_t *devp, int flag, int otype, cred_t *credp)
 	if (otype != OTYP_CHR) {
 		return (EINVAL);
 	}
-
 	if (drv_priv(credp) != 0) {
 		return (EPERM);
 	}
-
 	if (getminor(*devp) != VIONA_CTL_MINOR) {
 		return (ENXIO);
 	}
 
-	minor = id_alloc(viona_minor_ids);
+	minor = id_alloc_nosleep(viona_minors);
 	if (minor == 0) {
 		/* All minors are busy */
 		return (EBUSY);
 	}
-
 	if (ddi_soft_state_zalloc(viona_state, minor) != DDI_SUCCESS) {
-		id_free(viona_minor_ids, minor);
+		id_free(viona_minors, minor);
+		return (ENOMEM);
 	}
 
 	*devp = makedevice(getmajor(*devp), minor);
@@ -419,20 +423,19 @@ viona_close(dev_t dev, int flag, int otype, cred_t *credp)
 	}
 
 	viona_ioc_delete(ss);
-
 	ddi_soft_state_free(viona_state, minor);
-
-	id_free(viona_minor_ids, minor);
+	id_free(viona_minors, minor);
 
 	return (0);
 }
 
 static int
-viona_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
-    cred_t *credp, int *rval)
+viona_ioctl(dev_t dev, int cmd, intptr_t data, int md, cred_t *cr, int *rv)
 {
-	viona_soft_state_t	*ss;
-	int			err = 0;
+	viona_soft_state_t *ss;
+	void *dptr = (void *)data;
+	int err = 0, val;
+	viona_link_t *link;
 
 	ss = ddi_get_soft_state(viona_state, getminor(dev));
 	if (ss == NULL) {
@@ -441,74 +444,52 @@ viona_ioctl(dev_t dev, int cmd, intptr_t data, int mode,
 
 	switch (cmd) {
 	case VNA_IOC_CREATE:
-		err = viona_ioc_create(ss, (vioc_create_t *)data);
-		break;
+		return (viona_ioc_create(ss, dptr, md, cr));
 	case VNA_IOC_DELETE:
-		err = viona_ioc_delete(ss);
+		return (viona_ioc_delete(ss));
+	default:
 		break;
+	}
+
+	if ((link = ss->ss_link) == NULL || vmm_drv_expired(link->l_vm_hold)) {
+		return (ENXIO);
+	}
+	switch (cmd) {
 	case VNA_IOC_SET_FEATURES:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
+		if (ddi_copyin(dptr, &val, sizeof (val), md) != 0) {
+			return (EFAULT);
 		}
-		ss->ss_link->l_features = *(int *)data & VIONA_S_HOSTCAPS;
+		link->l_features = val & VIONA_S_HOSTCAPS;
 		break;
 	case VNA_IOC_GET_FEATURES:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
+		val = VIONA_S_HOSTCAPS;
+		if (ddi_copyout(&val, dptr, sizeof (val), md) != 0) {
+			return (EFAULT);
 		}
-		*(int *)data = VIONA_S_HOSTCAPS;
 		break;
 	case VNA_IOC_RX_RING_INIT:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		err = viona_ioc_rx_ring_init(ss->ss_link,
-		    (vioc_ring_init_t *)data);
-		break;
-	case VNA_IOC_RX_RING_RESET:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		err = viona_ioc_rx_ring_reset(ss->ss_link);
-		break;
-	case VNA_IOC_RX_RING_KICK:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		viona_ioc_rx_ring_kick(ss->ss_link);
-		err = 0;
+		err = viona_ioc_ring_init(link, &link->l_rx_vring, dptr, md);
 		break;
 	case VNA_IOC_TX_RING_INIT:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		err = viona_ioc_tx_ring_init(ss->ss_link,
-		    (vioc_ring_init_t *)data);
+		err = viona_ioc_ring_init(link, &link->l_tx_vring, dptr, md);
+		break;
+	case VNA_IOC_RX_RING_RESET:
+		err = viona_ioc_rx_ring_reset(link);
 		break;
 	case VNA_IOC_TX_RING_RESET:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		err = viona_ioc_tx_ring_reset(ss->ss_link);
+		err = viona_ioc_tx_ring_reset(link);
+		break;
+	case VNA_IOC_RX_RING_KICK:
+		viona_ioc_rx_ring_kick(link);
 		break;
 	case VNA_IOC_TX_RING_KICK:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		viona_ioc_tx_ring_kick(ss->ss_link);
-		err = 0;
+		viona_ioc_tx_ring_kick(link);
 		break;
 	case VNA_IOC_RX_INTR_CLR:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		err = viona_ioc_rx_intr_clear(ss->ss_link);
+		err = viona_ioc_rx_intr_clear(link);
 		break;
 	case VNA_IOC_TX_INTR_CLR:
-		if (ss->ss_link == NULL) {
-			return (ENOSYS);
-		}
-		err = viona_ioc_tx_intr_clear(ss->ss_link);
+		err = viona_ioc_tx_intr_clear(link);
 		break;
 	default:
 		err = ENOTTY;
@@ -547,55 +528,48 @@ viona_chpoll(dev_t dev, short events, int anyyet, short *reventsp,
 }
 
 static int
-viona_ioc_create(viona_soft_state_t *ss, vioc_create_t *u_create)
+viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 {
-	vioc_create_t		k_create;
-	viona_link_t		*link;
-	char			cli_name[MAXNAMELEN];
-	int			err;
+	vioc_create_t	kvc;
+	viona_link_t	*link;
+	char		cli_name[MAXNAMELEN];
+	int		err;
+	file_t		*fp;
+	vmm_hold_t	*hold = NULL;
 
 	if (ss->ss_link != NULL) {
-		return (ENOSYS);
+		return (EEXIST);
 	}
-	if (copyin(u_create, &k_create, sizeof (k_create)) != 0) {
+	if (ddi_copyin(dptr, &kvc, sizeof (kvc), md) != 0) {
 		return (EFAULT);
 	}
 
+	if ((fp = getf(kvc.c_vmfd)) == NULL) {
+		return (EBADF);
+	}
+	err = vmm_drv_hold(fp, cr, &hold);
+	releasef(kvc.c_vmfd);
+	if (err != NULL) {
+		return (err);
+	}
+
 	link = kmem_zalloc(sizeof (viona_link_t), KM_SLEEP);
-
-	link->l_linkid = k_create.c_linkid;
-	link->l_vm = vm_lookup_by_name(k_create.c_vmname);
-	if (link->l_vm == NULL) {
-		err = ENXIO;
-		goto bail;
-	}
-
-	link->l_vm_lomemsize = k_create.c_lomem_size;
-	link->l_vm_himemsize = k_create.c_himem_size;
-	err = viona_vm_map(link);
-	if (err != 0) {
-		goto bail;
-	}
+	link->l_linkid = kvc.c_linkid;
+	link->l_vm_hold = hold;
 
 	err = mac_open_by_linkid(link->l_linkid, &link->l_mh);
 	if (err != 0) {
-		cmn_err(CE_WARN, "viona create mac_open_by_linkid"
-		    " returned %d\n", err);
 		goto bail;
 	}
 
-	snprintf(cli_name, sizeof (cli_name), "%s-%d",
-	    VIONA_CLI_NAME, link->l_linkid);
+	(void) snprintf(cli_name, sizeof (cli_name), "%s-%d", VIONA_CLI_NAME,
+	    link->l_linkid);
 	err = mac_client_open(link->l_mh, &link->l_mch, cli_name, 0);
 	if (err != 0) {
-		cmn_err(CE_WARN, "viona create mac_client_open"
-		    " returned %d\n", err);
 		goto bail;
 	}
 
 	link->l_features = VIONA_S_HOSTCAPS;
-	link->l_desb_kmc = kmem_cache_create(cli_name,
-	    sizeof (viona_desb_t), 0, NULL, NULL, NULL, NULL, NULL, 0);
 
 	mutex_init(&link->l_rx_vring.hq_a_mutex, NULL, MUTEX_DRIVER, NULL);
 	mutex_init(&link->l_rx_vring.hq_u_mutex, NULL, MUTEX_DRIVER, NULL);
@@ -616,7 +590,9 @@ bail:
 	if (link->l_mh != NULL) {
 		mac_close(link->l_mh);
 	}
-
+	if (hold != NULL) {
+		vmm_drv_rele(hold);
+	}
 	kmem_free(link, sizeof (viona_link_t));
 
 	return (err);
@@ -645,8 +621,11 @@ viona_ioc_delete(viona_soft_state_t *ss)
 	if (link->l_mh != NULL) {
 		mac_close(link->l_mh);
 	}
+	if (link->l_vm_hold != NULL) {
+		vmm_drv_rele(link->l_vm_hold);
+		link->l_vm_hold = NULL;
+	}
 
-	viona_vm_unmap(link);
 	mutex_destroy(&link->l_tx_vring.hq_a_mutex);
 	mutex_destroy(&link->l_tx_vring.hq_u_mutex);
 	mutex_destroy(&link->l_rx_vring.hq_a_mutex);
@@ -656,8 +635,6 @@ viona_ioc_delete(viona_soft_state_t *ss)
 		cv_destroy(&link->l_tx_cv);
 	}
 
-	kmem_cache_destroy(link->l_desb_kmc);
-
 	kmem_free(link, sizeof (viona_link_t));
 
 	ss->ss_link = NULL;
@@ -665,143 +642,67 @@ viona_ioc_delete(viona_soft_state_t *ss)
 	return (0);
 }
 
-static caddr_t
-viona_mapin_vm_chunk(viona_link_t *link, uint64_t gpa, size_t len)
-{
-	caddr_t		addr;
-	size_t		offset;
-	pfn_t		pfnum;
-
-	if (len == 0)
-		return (NULL);
-
-	addr = vmem_alloc(heap_arena, len, VM_SLEEP);
-	if (addr == NULL)
-		return (NULL);
-
-	for (offset = 0; offset < len; offset += PAGESIZE) {
-		pfnum = btop(vm_gpa2hpa(link->l_vm, gpa + offset, PAGESIZE));
-		ASSERT(pfnum);
-		hat_devload(kas.a_hat, addr + offset, PAGESIZE, pfnum,
-		    PROT_READ | PROT_WRITE, HAT_LOAD_LOCK);
-	}
-
-	return (addr);
-}
-
-/*
- * Map the guest physical address space into the kernel virtual address space.
- */
-static int
-viona_vm_map(viona_link_t *link)
-{
-	link->l_vm_lomemaddr = viona_mapin_vm_chunk(link,
-	    0, link->l_vm_lomemsize);
-	if (link->l_vm_lomemaddr == NULL)
-		return (-1);
-	link->l_vm_himemaddr = viona_mapin_vm_chunk(link,
-	    4 * (1024 * 1024 * 1024UL), link->l_vm_himemsize);
-	if (link->l_vm_himemsize && link->l_vm_himemaddr == NULL)
-		return (-1);
-
-	return (0);
-}
-
 /*
  * Translate a guest physical address into a kernel virtual address.
  */
-static caddr_t
-viona_gpa2kva(viona_link_t *link, uint64_t gpa)
+static void *
+viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len)
 {
-	if (gpa < link->l_vm_lomemsize)
-		return (link->l_vm_lomemaddr + gpa);
-
-	gpa -= (4 * GB);
-	if (gpa < link->l_vm_himemsize)
-		return (link->l_vm_himemaddr + gpa);
-
-	return (NULL);
-}
-
-static void
-viona_vm_unmap(viona_link_t *link)
-{
-	if (link->l_vm_lomemaddr) {
-		hat_unload(kas.a_hat, link->l_vm_lomemaddr,
-		    link->l_vm_lomemsize, HAT_UNLOAD_UNLOCK);
-		vmem_free(heap_arena, link->l_vm_lomemaddr,
-		    link->l_vm_lomemsize);
-	}
-	if (link->l_vm_himemaddr) {
-		hat_unload(kas.a_hat, link->l_vm_himemaddr,
-		    link->l_vm_himemsize, HAT_UNLOAD_UNLOCK);
-		vmem_free(heap_arena, link->l_vm_himemaddr,
-		    link->l_vm_himemsize);
-	}
+	return (vmm_drv_gpa2kva(link->l_vm_hold, gpa, len));
 }
 
 static int
-viona_ioc_ring_init_common(viona_link_t *link, viona_vring_hqueue_t *hq,
-    vioc_ring_init_t *u_ri)
+viona_ioc_ring_init(viona_link_t *link, viona_vring_hqueue_t *hq,
+    void *u_ri, int md)
 {
-	vioc_ring_init_t	k_ri;
+	vioc_ring_init_t	kri;
+	uintptr_t		pos;
+	size_t			desc_sz, avail_sz, used_sz;
+	uint16_t		cnt;
 
-	if (copyin(u_ri, &k_ri, sizeof (k_ri)) != 0) {
+	if (ddi_copyin(u_ri, &kri, sizeof (kri), md) != 0) {
 		return (EFAULT);
 	}
 
-	hq->hq_size = k_ri.ri_qsize;
-	hq->hq_baseaddr = viona_gpa2kva(link, k_ri.ri_qaddr);
-	if (hq->hq_baseaddr == NULL)
+	cnt = kri.ri_qsize;
+	if (cnt == 0 || cnt > VRING_MAX_LEN || (1 << (ffs(cnt) - 1)) != cnt) {
 		return (EINVAL);
+	}
 
-	hq->hq_avail_flags = (uint16_t *)(viona_gpa2kva(link,
-	    k_ri.ri_qaddr + hq->hq_size * sizeof (struct virtio_desc)));
-	if (hq->hq_avail_flags == NULL)
+	pos = kri.ri_qaddr;
+	desc_sz = cnt * sizeof (struct virtio_desc);
+	avail_sz = (cnt + 3) * sizeof (uint16_t);
+	used_sz = (cnt * sizeof (struct virtio_used)) + (sizeof (uint16_t) * 3);
+
+	hq->hq_size = kri.ri_qsize;
+	hq->hq_descr = viona_gpa2kva(link, pos, desc_sz);
+	if (hq->hq_descr == NULL) {
 		return (EINVAL);
+	}
+	pos += desc_sz;
+
+	hq->hq_avail_flags = viona_gpa2kva(link, pos, avail_sz);
+	if (hq->hq_avail_flags == NULL) {
+		return (EINVAL);
+	}
 	hq->hq_avail_idx = hq->hq_avail_flags + 1;
 	hq->hq_avail_ring = hq->hq_avail_flags + 2;
+	hq->hq_avail_used_event = hq->hq_avail_ring + cnt;
+	pos += avail_sz;
 
-	hq->hq_used_flags = (uint16_t *)(viona_gpa2kva(link,
-	    P2ROUNDUP(k_ri.ri_qaddr +
-	    hq->hq_size * sizeof (struct virtio_desc) + 2, VRING_ALIGN)));
-	if (hq->hq_used_flags == NULL)
+	pos = P2ROUNDUP(pos, VRING_ALIGN);
+	hq->hq_used_flags = viona_gpa2kva(link, pos, used_sz);
+	if (hq->hq_used_flags == NULL) {
 		return (EINVAL);
+	}
 	hq->hq_used_idx = hq->hq_used_flags + 1;
 	hq->hq_used_ring = (struct virtio_used *)(hq->hq_used_flags + 2);
+	hq->hq_used_avail_event = (uint16_t *)(hq->hq_used_ring + cnt);
 
-	/*
-	 * Initialize queue indexes
-	 */
+	/* Initialize queue indexes */
 	hq->hq_cur_aidx = 0;
 
 	return (0);
-}
-
-static int
-viona_ioc_rx_ring_init(viona_link_t *link, vioc_ring_init_t *u_ri)
-{
-	viona_vring_hqueue_t	*hq;
-	int			rval;
-
-	hq = &link->l_rx_vring;
-
-	rval = viona_ioc_ring_init_common(link, hq, u_ri);
-	if (rval != 0) {
-		return (rval);
-	}
-
-	return (0);
-}
-
-static int
-viona_ioc_tx_ring_init(viona_link_t *link, vioc_ring_init_t *u_ri)
-{
-	viona_vring_hqueue_t	*hq;
-
-	hq = &link->l_tx_vring;
-
-	return (viona_ioc_ring_init_common(link, hq, u_ri));
 }
 
 static int
@@ -907,16 +808,13 @@ viona_ioc_tx_intr_clear(viona_link_t *link)
 
 	return (0);
 }
-#define	VQ_MAX_DESCRIPTORS	512
 
 static int
 vq_popchain(viona_link_t *link, viona_vring_hqueue_t *hq, struct iovec *iov,
     int n_iov, uint16_t *cookie)
 {
-	int			i;
-	int			ndesc, nindir;
-	int			idx, head, next;
-	struct virtio_desc	*vdir, *vindir, *vp;
+	uint_t i, ndesc, idx, head, next;
+	struct virtio_desc vdir;
 
 	idx = hq->hq_cur_aidx;
 	ndesc = (uint16_t)((unsigned)*hq->hq_avail_idx - (unsigned)idx);
@@ -924,80 +822,77 @@ vq_popchain(viona_link_t *link, viona_vring_hqueue_t *hq, struct iovec *iov,
 	if (ndesc == 0)
 		return (0);
 	if (ndesc > hq->hq_size) {
-		cmn_err(CE_NOTE, "ndesc (%d) out of range\n", ndesc);
+		DTRACE_PROBE1(viona__ndesc_to_high, uint16_t, ndesc);
 		return (-1);
 	}
 
 	head = hq->hq_avail_ring[idx & (hq->hq_size - 1)];
 	next = head;
 
-	for (i = 0; i < VQ_MAX_DESCRIPTORS; next = vdir->vd_next) {
+	for (i = 0; i < VQ_MAX_DESCRIPTORS; next = vdir.vd_next) {
 		if (next >= hq->hq_size) {
-			cmn_err(CE_NOTE, "descriptor index (%d)"
-			    "out of range\n", next);
+			DTRACE_PROBE1(viona__bad_idx, uint16_t, next);
 			return (-1);
 		}
 
-		vdir = (struct virtio_desc *)(hq->hq_baseaddr +
-		    next * sizeof (struct virtio_desc));
-		if ((vdir->vd_flags & VRING_DESC_F_INDIRECT) == 0) {
+		vdir = hq->hq_descr[next];
+		if ((vdir.vd_flags & VRING_DESC_F_INDIRECT) == 0) {
 			if (i > n_iov)
 				return (-1);
-			iov[i].iov_base = viona_gpa2kva(link, vdir->vd_addr);
+			iov[i].iov_base = viona_gpa2kva(link, vdir.vd_addr,
+			    vdir.vd_len);
 			if (iov[i].iov_base == NULL) {
-				cmn_err(CE_NOTE, "invalid guest physical"
-				    " address 0x%"PRIx64"\n", vdir->vd_addr);
+				VIONA_PROBE_BAD_ADDR(vdir.vd_addr);
 				return (-1);
 			}
-			iov[i++].iov_len = vdir->vd_len;
+			iov[i++].iov_len = vdir.vd_len;
 		} else {
-			nindir = vdir->vd_len / 16;
-			if ((vdir->vd_len & 0xf) || nindir == 0) {
-				cmn_err(CE_NOTE, "invalid indir len 0x%x\n",
-				    vdir->vd_len);
+			const uint_t nindir = vdir.vd_len / 16;
+			volatile struct virtio_desc *vindir;
+
+			if ((vdir.vd_len & 0xf) || nindir == 0) {
+				DTRACE_PROBE1(viona__indir_bad_len,
+				    uint32_t, vdir.vd_len);
 				return (-1);
 			}
-			vindir = (struct virtio_desc *)
-			    viona_gpa2kva(link, vdir->vd_addr);
+			vindir = viona_gpa2kva(link, vdir.vd_addr, vdir.vd_len);
 			if (vindir == NULL) {
-				cmn_err(CE_NOTE, "invalid guest physical"
-				    " address 0x%"PRIx64"\n", vdir->vd_addr);
+				VIONA_PROBE_BAD_ADDR(vdir.vd_addr);
 				return (-1);
 			}
 			next = 0;
 			for (;;) {
-				vp = &vindir[next];
-				if (vp->vd_flags & VRING_DESC_F_INDIRECT) {
-					cmn_err(CE_NOTE, "indirect desc"
-					    " has INDIR flag\n");
+				struct virtio_desc vp;
+
+				vp = vindir[next];
+				if (vp.vd_flags & VRING_DESC_F_INDIRECT) {
+					DTRACE_PROBE(viona__indir_bad_nest);
 					return (-1);
 				}
 				if (i > n_iov)
 					return (-1);
-				iov[i].iov_base =
-				    viona_gpa2kva(link, vp->vd_addr);
+				iov[i].iov_base = viona_gpa2kva(link,
+				    vp.vd_addr, vp.vd_len);
 				if (iov[i].iov_base == NULL) {
-					cmn_err(CE_NOTE, "invalid guest"
-					    " physical address 0x%"PRIx64"\n",
-					    vp->vd_addr);
+					VIONA_PROBE_BAD_ADDR(vp.vd_addr);
 					return (-1);
 				}
-				iov[i++].iov_len = vp->vd_len;
+				iov[i++].iov_len = vp.vd_len;
 
 				if (i > VQ_MAX_DESCRIPTORS)
 					goto loopy;
-				if ((vp->vd_flags & VRING_DESC_F_NEXT) == 0)
+				if ((vp.vd_flags & VRING_DESC_F_NEXT) == 0)
 					break;
 
-				next = vp->vd_next;
+				next = vp.vd_next;
 				if (next >= nindir) {
-					cmn_err(CE_NOTE, "invalid next"
-					    " %d > %d\n", next, nindir);
+					DTRACE_PROBE2(viona__indir_bad_next,
+					    uint16_t, next, uint_t, nindir);
 					return (-1);
 				}
 			}
 		}
-		if ((vdir->vd_flags & VRING_DESC_F_NEXT) == 0) {
+		if ((vdir.vd_flags & VRING_DESC_F_NEXT) == 0) {
 			*cookie = head;
 			hq->hq_cur_aidx++;
 			return (i);
@@ -1005,16 +900,15 @@ vq_popchain(viona_link_t *link, viona_vring_hqueue_t *hq, struct iovec *iov,
 	}
 
 loopy:
-	cmn_err(CE_NOTE, "%d > descriptor loop count\n", i);
-
+	DTRACE_PROBE1(viona__bad_loop_count, uint_t, i);
 	return (-1);
 }
 
 static void
 vq_pushchain(viona_vring_hqueue_t *hq, uint32_t len, uint16_t cookie)
 {
-	struct virtio_used	*vu;
-	int			uidx;
+	volatile struct virtio_used *vu;
+	uint_t uidx;
 
 	uidx = *hq->hq_used_idx;
 	vu = &hq->hq_used_ring[uidx++ & (hq->hq_size - 1)];
@@ -1027,9 +921,8 @@ vq_pushchain(viona_vring_hqueue_t *hq, uint32_t len, uint16_t cookie)
 static void
 vq_pushchain_mrgrx(viona_vring_hqueue_t *hq, int num_bufs, used_elem_t *elem)
 {
-	struct virtio_used	*vu;
-	int			uidx;
-	int			i;
+	volatile struct virtio_used *vu;
+	uint_t uidx, i;
 
 	uidx = *hq->hq_used_idx;
 	if (num_bufs == 1) {
@@ -1138,9 +1031,6 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
 		uint16_t		cookie;
 		struct virtio_net_hdr	*vrx = NULL;
 		struct virtio_net_mrgrxhdr *vmrgrx = NULL;
-#if notyet
-		mblk_t			*ml;
-#endif
 		caddr_t			buf = NULL;
 		int			total_len = 0;
 		int			copied_buf = 0;
@@ -1311,10 +1201,6 @@ viona_desb_free(viona_desb_t *dp)
 {
 	viona_link_t		*link;
 	viona_vring_hqueue_t	*hq;
-#if notyet
-	struct virtio_used	*vu;
-	int			uidx;
-#endif
 	uint_t			ref;
 
 	ref = atomic_dec_uint_nv(&dp->d_ref);
@@ -1328,7 +1214,7 @@ viona_desb_free(viona_desb_t *dp)
 	vq_pushchain(hq, dp->d_len, dp->d_cookie);
 	mutex_exit(&hq->hq_u_mutex);
 
-	kmem_cache_free(link->l_desb_kmc, dp);
+	kmem_cache_free(viona_desb_cache, dp);
 
 	if ((*hq->hq_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
 		if (atomic_cas_uint(&link->l_tx_intr, 0, 1) == 0) {
@@ -1361,7 +1247,7 @@ viona_tx(viona_link_t *link, viona_vring_hqueue_t *hq)
 	mutex_exit(&hq->hq_a_mutex);
 	ASSERT(n != 0);
 
-	dp = kmem_cache_alloc(link->l_desb_kmc, KM_SLEEP);
+	dp = kmem_cache_alloc(viona_desb_cache, KM_SLEEP);
 	dp->d_frtn.free_func = viona_desb_free;
 	dp->d_frtn.free_arg = (void *)dp;
 	dp->d_link = link;

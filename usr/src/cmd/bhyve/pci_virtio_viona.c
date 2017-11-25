@@ -347,10 +347,6 @@ static int
 pci_viona_viona_init(struct vmctx *ctx, struct pci_viona_softc *sc)
 {
 	vioc_create_t		vna_create;
-#if notyet
-	char			devname[MAXNAMELEN];
-	int			ctlfd;
-#endif
 	int			error;
 
 	sc->vsc_vnafd = open("/devices/pseudo/viona@0:ctl", O_RDWR | O_EXCL);
@@ -360,16 +356,10 @@ pci_viona_viona_init(struct vmctx *ctx, struct pci_viona_softc *sc)
 	}
 
 	vna_create.c_linkid = sc->vsc_linkid;
-	strlcpy(vna_create.c_vmname, vmname,
-	    sizeof (vna_create.c_vmname));
-#if notyet
-	vm_get_memory_seg(ctx, 1 * (1024 * 1024UL), &vna_create.c_lomem_size,
-	    NULL);
-	vm_get_memory_seg(ctx, 4 * (1024 * 1024 * 1024UL),
-	    &vna_create.c_himem_size, NULL);
-#endif
+	vna_create.c_vmfd = vm_get_device_fd(ctx);
 	error = ioctl(sc->vsc_vnafd, VNA_IOC_CREATE, &vna_create);
 	if (error != 0) {
+		(void) close(sc->vsc_vnafd);
 		WPRINTF(("ioctl viona create failed %d\n", error));
 		return (-1);
 	}

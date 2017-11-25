@@ -107,6 +107,12 @@ struct vmspace_mapping {
 };
 typedef struct vmspace_mapping vmspace_mapping_t;
 
+#define VMSM_KADDR(vmsm, addr)	(			\
+	(uintptr_t)(vmsm)->vmsm_object->vmo_kmem +	\
+	    (vmsm)->vmsm_offset +			\
+	    ((addr) - (uintptr_t)(vmsm)->vmsm_addr))
+
+
 /* Private glue interfaces */
 static void pmap_free(pmap_t);
 static eptable_t *eptable_alloc(void);
@@ -198,6 +204,28 @@ vmspace_resident_count(struct vmspace *vms)
 {
 	/* XXXJOY: finish */
 	return (0);
+}
+
+void *
+vmspace_find_kva(struct vmspace *vms, uintptr_t addr, size_t size)
+{
+	vmspace_mapping_t *vmsm;
+	void *result = NULL;
+
+	mutex_enter(&vms->vms_lock);
+	vmsm = vm_mapping_find(vms, addr, size);
+	if (vmsm != NULL) {
+		switch (vmsm->vmsm_object->vmo_type) {
+		case OBJT_DEFAULT:
+			result = (void *)VMSM_KADDR(vmsm, addr);
+			break;
+		default:
+			break;
+		}
+	}
+	mutex_exit(&vms->vms_lock);
+
+	return (result);
 }
 
 static int
@@ -841,9 +869,7 @@ static pfn_t
 vm_mapping_page(vmspace_mapping_t *vmsm, uintptr_t vaddr, pfn_t *lpfn,
     uint_t *lvl)
 {
-	const uintptr_t mapoff = (vaddr - (uintptr_t)vmsm->vmsm_addr);
-	const uintptr_t kaddr = (uintptr_t)vmsm->vmsm_object->vmo_kmem +
-	    vmsm->vmsm_offset + mapoff;
+	const uintptr_t kaddr = VMSM_KADDR(vmsm, vaddr);
 	uint_t idx, level;
 	htable_t *ht;
 	x86pte_t pte;

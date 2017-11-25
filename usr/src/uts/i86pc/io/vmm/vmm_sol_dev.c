@@ -26,6 +26,7 @@
 #include <sys/vmm_instruction_emul.h>
 #include <sys/vmm_dev.h>
 #include <sys/vmm_impl.h>
+#include <sys/vmm_drv.h>
 
 #include <vm/vm.h>
 #include <vm/seg_dev.h>
@@ -60,6 +61,12 @@ static	void vmm_trace_rbuf_alloc(void);
 #if notyet
 static	void vmm_trace_rbuf_free(void);
 #endif
+
+struct vmm_hold {
+	list_node_t	vmh_node;
+	vmm_softc_t	*vmh_sc;
+	boolean_t	vmh_expired;
+};
 
 /*
  * This routine is used to manage debug messages
@@ -1117,6 +1124,9 @@ vmmdev_do_vm_create(dev_info_t *dip, char *name)
 		sc->vmm_minor = minor;
 		list_create(&sc->vmm_devmem_list, sizeof (vmm_devmem_entry_t),
 		    offsetof(vmm_devmem_entry_t, vde_node));
+		list_create(&sc->vmm_holds, sizeof (vmm_hold_t),
+		    offsetof(vmm_hold_t, vmh_node));
+		cv_init(&sc->vmm_cv, NULL, CV_DEFAULT, NULL);
 		list_insert_tail(&vmmdev_list, sc);
 		mutex_exit(&vmmdev_mtx);
 		return (0);
@@ -1150,28 +1160,119 @@ vmm_lookup(const char *name)
 	return (sc);
 }
 
-struct vm *
-vm_lookup_by_name(char *name)
+int
+vmm_drv_hold(file_t *fp, cred_t *cr, vmm_hold_t **holdp)
 {
-#if 0
-	vmm_softc_t	*sc;
-	/*
-	 * XXXJOY: This is racy (since no hold is placed on the vm object) and
-	 * should be improved for the viona linkage.
-	 */
-	mutex_enter(&vmmdev_mtx);
+	vnode_t *vp = fp->f_vnode;
+	const dev_t dev = vp->v_rdev;
+	minor_t minor;
+	minor_t major;
+	vmm_softc_t *sc;
+	vmm_hold_t *hold;
+	int err = 0;
 
-	if ((sc = vmm_lookup(name)) == NULL) {
-		mutex_exit(&vmmdev_mtx);
-		return (NULL);
+	if (vp->v_type != VCHR) {
+		return (ENXIO);
+	}
+	major = getmajor(dev);
+	minor = getminor(dev);
+
+	mutex_enter(&vmmdev_mtx);
+	if (vmm_dip == NULL) {
+		err = ENOENT;
+		goto out;
+	}
+	if (major != ddi_driver_major(vmm_dip) ||
+	    (sc = ddi_get_soft_state(vmm_statep, minor)) == NULL) {
+		err = ENOENT;
+		goto out;
+	}
+	/* XXXJOY: check cred permissions against instance */
+
+	if ((sc->vmm_flags & (VMM_CLEANUP|VMM_PURGED)) != 0) {
+		err = EBUSY;
+		goto out;
 	}
 
-	mutex_exit(&vmmdev_mtx);
+	hold = kmem_alloc(sizeof (*hold), KM_SLEEP);
+	hold->vmh_sc = sc;
+	hold->vmh_expired = B_FALSE;
+	list_insert_tail(&sc->vmm_holds, hold);
+	sc->vmm_flags |= VMM_HELD;
+	*holdp = hold;
 
-	return (sc->vmm_vm);
-#endif
-	return (NULL);
+out:
+	mutex_exit(&vmmdev_mtx);
+	return (err);
 }
+
+void
+vmm_drv_rele(vmm_hold_t *hold)
+{
+	vmm_softc_t *sc;
+
+	ASSERT(hold != NULL);
+	ASSERT(hold->vmh_softc != NULL);
+
+	mutex_enter(&vmmdev_mtx);
+	sc = hold->vmh_sc;
+	list_remove(&sc->vmm_holds, hold);
+	if (list_is_empty(&sc->vmm_holds)) {
+		sc->vmm_flags &= ~VMM_HELD;
+		cv_broadcast(&sc->vmm_cv);
+	}
+	mutex_exit(&vmmdev_mtx);
+	kmem_free(hold, sizeof (*hold));
+}
+
+boolean_t
+vmm_drv_expired(vmm_hold_t *hold)
+{
+	ASSERT(hold != NULL);
+
+	return (hold->vmh_expired);
+}
+
+void *
+vmm_drv_gpa2kva(vmm_hold_t *hold, uintptr_t gpa, size_t sz)
+{
+	struct vm *vm;
+	struct vmspace *vmspace;
+
+	ASSERT(hold != NULL);
+
+	vm = hold->vmh_sc->vmm_vm;
+	vmspace = vm_get_vmspace(vm);
+
+	return (vmspace_find_kva(vmspace, gpa, sz));
+}
+
+static int
+vmm_drv_purge(vmm_softc_t *sc)
+{
+	ASSERT(MUTEX_HELD(&vmmdev_mtx));
+
+	if ((sc->vmm_flags & VMM_HELD) != 0) {
+		vmm_hold_t *hold;
+
+		sc->vmm_flags |= VMM_CLEANUP;
+		for (hold = list_head(&sc->vmm_holds); hold != NULL;
+		    hold = list_next(&sc->vmm_holds, hold)) {
+			hold->vmh_expired = B_TRUE;
+		}
+		while ((sc->vmm_flags & VMM_HELD) != 0) {
+			if (cv_wait_sig(&sc->vmm_cv, &vmmdev_mtx) <= 0) {
+				return (EINTR);
+			}
+		}
+		sc->vmm_flags &= ~VMM_CLEANUP;
+	}
+
+	VERIFY(list_is_empty(&sc->vmm_holds));
+	sc->vmm_flags |= VMM_PURGED;
+	return (0);
+}
+
 
 static int
 vmmdev_do_vm_destroy(dev_info_t *dip, const char *name)
@@ -1189,6 +1290,10 @@ vmmdev_do_vm_destroy(dev_info_t *dip, const char *name)
 	if (sc->vmm_is_open) {
 		mutex_exit(&vmmdev_mtx);
 		return (EBUSY);
+	}
+	if (vmm_drv_purge(sc) != 0) {
+		mutex_exit(&vmmdev_mtx);
+		return (EINTR);
 	}
 
 	/* Clean up devmem entries */
@@ -1404,10 +1509,10 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		mutex_exit(&vmmdev_mtx);
 		return (DDI_FAILURE);
 	}
-	mutex_exit(&vmmdev_mtx);
 
 	/* XXX: This needs updating */
 	if (!vmm_arena_fini()) {
+		mutex_exit(&vmmdev_mtx);
 		return (DDI_FAILURE);
 	}
 
@@ -1415,6 +1520,7 @@ vmm_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	ddi_remove_minor_node(dip, VMM_CTL_MINOR_NODE);
 	vmm_dip = NULL;
 	vmm_sol_glue_cleanup();
+	mutex_exit(&vmmdev_mtx);
 
 	return (DDI_SUCCESS);
 }
