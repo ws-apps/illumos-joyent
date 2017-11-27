@@ -36,17 +36,25 @@ __FBSDID("$FreeBSD$");
 #include <sys/module.h>
 #include <sys/bus.h>
 #include <sys/pciio.h>
+#ifdef __FreeBSD__
 #include <sys/rman.h>
+#endif
 #include <sys/smp.h>
 #include <sys/sysctl.h>
 
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
 
+#ifdef __FreeBSD__
 #include <machine/resource.h>
+#endif
 
 #include <machine/vmm.h>
 #include <machine/vmm_dev.h>
+
+#include <sys/conf.h>
+#include <sys/ddi.h>
+#include <sys/sunddi.h>
 
 #include "vmm_lapic.h"
 #include "vmm_ktr.h"
@@ -89,20 +97,31 @@ struct pptdev {
 	struct pptseg mmio[MAX_MMIOSEGS];
 	struct {
 		int	num_msgs;		/* guest state */
-
+#ifdef __FreeBSD__
 		int	startrid;		/* host state */
 		struct resource *res[MAX_MSIMSGS];
 		void	*cookie[MAX_MSIMSGS];
+#else
+		boolean_t is_fixed;
+		size_t	inth_sz;
+		ddi_intr_handle_t *inth;
+#endif
 		struct pptintr_arg arg[MAX_MSIMSGS];
 	} msi;
 
 	struct {
 		int num_msgs;
+#ifdef __FreeBSD__
 		int startrid;
 		int msix_table_rid;
 		struct resource *msix_table_res;
 		struct resource **res;
 		void **cookie;
+#else
+		size_t inth_sz;
+		size_t arg_sz;
+		ddi_intr_handle_t *inth;
+#endif
 		struct pptintr_arg *arg;
 	} msix;
 };
@@ -116,6 +135,7 @@ SYSCTL_INT(_hw_vmm_ppt, OID_AUTO, devices, CTLFLAG_RD, &num_pptdevs, 0,
 
 static TAILQ_HEAD(, pptdev) pptdev_list = TAILQ_HEAD_INITIALIZER(pptdev_list);
 
+#ifdef __FreeBSD__
 static int
 ppt_probe(device_t dev)
 {
@@ -146,6 +166,7 @@ ppt_probe(device_t dev)
 		 */
 		return (BUS_PROBE_NOWILDCARD);
 }
+#endif
 
 static int
 ppt_attach(device_t dev)
@@ -158,8 +179,10 @@ ppt_attach(device_t dev)
 	TAILQ_INSERT_TAIL(&pptdev_list, ppt, next);
 	ppt->dev = dev;
 
+#ifdef __FreeBSD__
 	if (bootverbose)
 		device_printf(dev, "attached\n");
+#endif
 
 	return (0);
 }
@@ -179,6 +202,7 @@ ppt_detach(device_t dev)
 	return (0);
 }
 
+#ifdef __FreeBSD__
 static device_method_t ppt_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		ppt_probe),
@@ -190,6 +214,112 @@ static device_method_t ppt_methods[] = {
 static devclass_t ppt_devclass;
 DEFINE_CLASS_0(ppt, ppt_driver, ppt_methods, sizeof(struct pptdev));
 DRIVER_MODULE(ppt, pci, ppt_driver, ppt_devclass, NULL, NULL);
+#endif
+
+static void *ppt_state;
+
+static int
+ppt_ddi_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
+{
+	struct pptdev *ppt;
+
+	if (cmd != DDI_ATTACH)
+		return (DDI_FAILURE);
+
+	ddi_soft_state_zalloc(ppt_state, ddi_get_instance(dip));
+
+	ppt = ddi_get_soft_state(ppt_state, ddi_get_instance(dip));
+	ppt->dev = dip;
+
+	ddi_set_driver_private(dip, ppt);
+
+	if (ppt_attach(dip) == 0)
+			return (DDI_SUCCESS);
+
+	ddi_set_driver_private(dip, NULL);
+
+	ddi_soft_state_free(ppt_state, ddi_get_instance(dip));
+
+	return (DDI_FAILURE);
+}
+
+static int
+ppt_ddi_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
+{
+	if (cmd != DDI_DETACH)
+		return (DDI_FAILURE);
+
+	if (ppt_detach(dip) != 0)
+			return (DDI_FAILURE);
+
+	ddi_set_driver_private(dip, NULL);
+
+	ddi_soft_state_free(ppt_state, ddi_get_instance(dip));
+
+	return (DDI_SUCCESS);
+}
+
+static struct dev_ops ppt_ops = {
+	DEVO_REV,
+	0,
+	ddi_no_info,
+	nulldev,	/* identify */
+	nulldev,	/* probe */
+	ppt_ddi_attach,
+	ppt_ddi_detach,
+	nodev,		/* reset */
+	(struct cb_ops *)NULL,
+	(struct bus_ops *)NULL
+};
+
+static struct modldrv modldrv = {
+	&mod_driverops,
+	"ppt",
+	&ppt_ops
+};
+
+static struct modlinkage modlinkage = {
+	MODREV_1,
+	&modldrv,
+	NULL
+};
+
+int
+_init(void)
+{
+	int	error;
+
+	error = ddi_soft_state_init(&ppt_state, sizeof (struct pptdev), 0);
+	if (error)
+		return (error);
+
+	error = mod_install(&modlinkage);
+	if (error)
+		ddi_soft_state_fini(&ppt_state);
+
+	return (error);
+}
+
+int
+_fini(void)
+{
+	int	error;
+
+	error = mod_remove(&modlinkage);
+	if (error)
+		return (error);
+
+	ddi_soft_state_fini(&ppt_state);
+
+	return (0);
+}
+
+int
+_info(struct modinfo *modinfop)
+{
+	return (mod_info(&modlinkage, modinfop));
+}
+
 
 static struct pptdev *
 ppt_find(int bus, int slot, int func)
@@ -228,13 +358,17 @@ static void
 ppt_teardown_msi(struct pptdev *ppt)
 {
 	int i, rid;
+#ifdef __FreeBSD__
 	void *cookie;
 	struct resource *res;
+#endif
+	int intr_cap = 0;
 
 	if (ppt->msi.num_msgs == 0)
 		return;
 
 	for (i = 0; i < ppt->msi.num_msgs; i++) {
+#ifdef __FreeBSD__
 		rid = ppt->msi.startrid + i;
 		res = ppt->msi.res[i];
 		cookie = ppt->msi.cookie[i];
@@ -247,10 +381,29 @@ ppt_teardown_msi(struct pptdev *ppt)
 		
 		ppt->msi.res[i] = NULL;
 		ppt->msi.cookie[i] = NULL;
+#else
+		(void) ddi_intr_get_cap(ppt->msi.inth[i], &intr_cap);
+		if (intr_cap & DDI_INTR_FLAG_BLOCK)
+			ddi_intr_block_disable(&ppt->msi.inth[i], 1);
+		else
+			ddi_intr_disable(ppt->msi.inth[i]);
+
+		ddi_intr_remove_handler(ppt->msi.inth[i]);
+		ddi_intr_free(ppt->msi.inth[i]);
+
+		ppt->msi.inth[i] = NULL;
+#endif
 	}
 
+#ifdef __FreeBSD__
 	if (ppt->msi.startrid == 1)
 		pci_release_msi(ppt->dev);
+#else
+	kmem_free(ppt->msi.inth, ppt->msi.inth_sz);
+	ppt->msi.inth = NULL;
+	ppt->msi.inth_sz = 0;
+	ppt->msi.is_fixed = B_FALSE;
+#endif
 
 	ppt->msi.num_msgs = 0;
 }
@@ -258,6 +411,7 @@ ppt_teardown_msi(struct pptdev *ppt)
 static void 
 ppt_teardown_msix_intr(struct pptdev *ppt, int idx)
 {
+#ifdef __FreeBSD__
 	int rid;
 	struct resource *res;
 	void *cookie;
@@ -274,6 +428,19 @@ ppt_teardown_msix_intr(struct pptdev *ppt, int idx)
 
 	ppt->msix.res[idx] = NULL;
 	ppt->msix.cookie[idx] = NULL;
+#else
+	if (ppt->msix.inth != NULL && ppt->msix.inth[idx] != NULL) {
+		int intr_cap;
+
+		(void) ddi_intr_get_cap(ppt->msix.inth[idx], &intr_cap);
+		if (intr_cap & DDI_INTR_FLAG_BLOCK)
+			ddi_intr_block_disable(&ppt->msix.inth[idx], 1);
+		else
+			ddi_intr_disable(ppt->msix.inth[idx]);
+
+		ddi_intr_remove_handler(ppt->msix.inth[idx]);
+	}
+#endif
 }
 
 static void 
@@ -284,9 +451,10 @@ ppt_teardown_msix(struct pptdev *ppt)
 	if (ppt->msix.num_msgs == 0) 
 		return;
 
-	for (i = 0; i < ppt->msix.num_msgs; i++) 
+	for (i = 0; i < ppt->msix.num_msgs; i++)
 		ppt_teardown_msix_intr(ppt, i);
 
+#ifdef __FreeBSD__
 	if (ppt->msix.msix_table_res) {
 		bus_release_resource(ppt->dev, SYS_RES_MEMORY, 
 				     ppt->msix.msix_table_rid,
@@ -300,6 +468,18 @@ ppt_teardown_msix(struct pptdev *ppt)
 	free(ppt->msix.arg, M_PPTMSIX);
 
 	pci_release_msi(ppt->dev);
+#else
+	if (ppt->msix.inth) {
+		for (i = 0; i < ppt->msix.num_msgs; i++)
+			ddi_intr_free(ppt->msix.inth[i]);
+		kmem_free(ppt->msix.inth, ppt->msix.inth_sz);
+		ppt->msix.inth = NULL;
+		ppt->msix.inth_sz = 0;
+		kmem_free(ppt->msix.arg, ppt->msix.arg_sz);
+		ppt->msix.arg = NULL;
+		ppt->msix.arg_sz = 0;
+	}
+#endif
 
 	ppt->msix.num_msgs = 0;
 }
@@ -453,13 +633,18 @@ ppt_map_mmio(struct vm *vm, int bus, int slot, int func,
 	return (ENOENT);
 }
 
+#ifdef __FreeBSD__
 static int
 pptintr(void *arg)
+#else
+static uint_t
+pptintr(char *arg, char *unused)
+#endif
 {
 	struct pptdev *ppt;
 	struct pptintr_arg *pptarg;
 	
-	pptarg = arg;
+	pptarg = (struct pptintr_arg *)arg;
 	ppt = pptarg->pptdev;
 
 	if (ppt->vm != NULL)
@@ -475,10 +660,14 @@ pptintr(void *arg)
 	 * For legacy interrupts give other filters a chance in case
 	 * the interrupt was not generated by the passthrough device.
 	 */
+#ifdef __FreeBSD__
 	if (ppt->msi.startrid == 0)
 		return (FILTER_STRAY);
 	else
 		return (FILTER_HANDLED);
+#else
+	return (ppt->msi.is_fixed ? DDI_INTR_UNCLAIMED : DDI_INTR_CLAIMED);
+#endif
 }
 
 int
@@ -487,6 +676,7 @@ ppt_setup_msi(struct vm *vm, int vcpu, int bus, int slot, int func,
 {
 	int i, rid, flags;
 	int msi_count, startrid, error, tmp;
+	int intr_type, intr_cap = 0;
 	struct pptdev *ppt;
 
 	if (numvec < 0 || numvec > MAX_MSIMSGS)
@@ -504,6 +694,7 @@ ppt_setup_msi(struct vm *vm, int vcpu, int bus, int slot, int func,
 	if (numvec == 0)		/* nothing more to do */
 		return (0);
 
+#ifdef __FreeBSD__
 	flags = RF_ACTIVE;
 	msi_count = pci_msi_count(ppt->dev);
 	if (msi_count == 0) {
@@ -563,6 +754,65 @@ ppt_setup_msi(struct vm *vm, int vcpu, int bus, int slot, int func,
 		if (error != 0)
 			break;
 	}
+#else
+	if (ddi_intr_get_navail(ppt->dev, DDI_INTR_TYPE_MSI, &msi_count) !=
+	    DDI_SUCCESS) {
+		if (ddi_intr_get_navail(ppt->dev, DDI_INTR_TYPE_FIXED,
+		    &msi_count) != DDI_SUCCESS)
+			return (EINVAL);
+
+		intr_type = DDI_INTR_TYPE_FIXED;
+		ppt->msi.is_fixed = B_TRUE;
+	} else {
+		intr_type = DDI_INTR_TYPE_MSI;
+	}
+
+	/*
+	 * The device must be capable of supporting the number of vectors
+	 * the guest wants to allocate.
+	 */
+	if (numvec > msi_count)
+		return (EINVAL);
+
+	ppt->msi.inth_sz = numvec * sizeof (ddi_intr_handle_t);
+	ppt->msi.inth = kmem_zalloc(ppt->msi.inth_sz, KM_SLEEP);
+	if (ddi_intr_alloc(ppt->dev, ppt->msi.inth, intr_type, 0,
+	    numvec, &msi_count, 0) != DDI_SUCCESS) {
+		kmem_free(ppt->msi.inth, ppt->msi.inth_sz);
+		return (EINVAL);
+	}
+
+	/*
+	 * Again, make sure we actually got as many vectors as the guest wanted
+	 * to allocate.
+	 */
+	if (numvec != msi_count) {
+		ppt_teardown_msi(ppt);
+		return (EINVAL);
+	}
+	/*
+	 * Set up & enable interrupt handler for each vector.
+	 */
+	for (i = 0; i < numvec; i++) {
+		ppt->msi.num_msgs = i + 1;
+		ppt->msi.arg[i].pptdev = ppt;
+		ppt->msi.arg[i].addr = addr;
+		ppt->msi.arg[i].msg_data = msg + i;
+
+		if (ddi_intr_add_handler(ppt->msi.inth[i], pptintr,
+		    &ppt->msi.arg[i], NULL) != DDI_SUCCESS)
+			break;
+
+		(void) ddi_intr_get_cap(ppt->msi.inth[i], &intr_cap);
+		if (intr_cap & DDI_INTR_FLAG_BLOCK)
+			error = ddi_intr_block_enable(&ppt->msi.inth[i], 1);
+		else
+			error = ddi_intr_enable(ppt->msi.inth[i]);
+
+		if (error != DDI_SUCCESS)
+			break;
+	}
+#endif
 	
 	if (i < numvec) {
 		ppt_teardown_msi(ppt);
@@ -580,6 +830,7 @@ ppt_setup_msix(struct vm *vm, int vcpu, int bus, int slot, int func,
 	struct pci_devinfo *dinfo;
 	int numvec, alloced, rid, error;
 	size_t res_size, cookie_size, arg_size;
+	int intr_cap;
 
 	ppt = ppt_find(bus, slot, func);
 	if (ppt == NULL)
@@ -587,6 +838,7 @@ ppt_setup_msix(struct vm *vm, int vcpu, int bus, int slot, int func,
 	if (ppt->vm != vm)		/* Make sure we own this device */
 		return (EBUSY);
 
+#ifdef __FreeBSD__
 	dinfo = device_get_ivars(ppt->dev);
 	if (!dinfo) 
 		return (ENXIO);
@@ -631,11 +883,49 @@ ppt_setup_msix(struct vm *vm, int vcpu, int bus, int slot, int func,
 			return (error == 0 ? ENOSPC: error);
 		}
 	}
+#else
+	/*
+	 * First-time configuration:
+	 * 	Allocate the MSI-X table
+	 *	Allocate the IRQ resources
+	 *	Set up some variables in ppt->msix
+	 */
+	if (ppt->msix.num_msgs == 0) {
+		if (ddi_intr_get_navail(ppt->dev, DDI_INTR_TYPE_MSIX, &numvec) !=
+		    DDI_SUCCESS)
+			return (EINVAL);
+
+		ppt->msix.num_msgs = numvec;
+
+		ppt->msix.arg_sz = numvec * sizeof(ppt->msix.arg[0]);
+		ppt->msix.arg = kmem_zalloc(ppt->msix.arg_sz, KM_SLEEP);
+		ppt->msix.inth_sz = numvec * sizeof(ddi_intr_handle_t);
+		ppt->msix.inth = kmem_zalloc(ppt->msix.inth_sz, KM_SLEEP);
+
+		if (ddi_intr_alloc(ppt->dev, ppt->msix.inth, DDI_INTR_TYPE_MSIX,
+		    0, numvec, &alloced, 0) != DDI_SUCCESS) {
+			kmem_free(ppt->msix.arg, ppt->msix.arg_sz);
+			kmem_free(ppt->msix.inth, ppt->msix.inth_sz);
+			ppt->msix.arg = NULL;
+			ppt->msix.inth = NULL;
+			ppt->msix.arg_sz = ppt->msix.inth_sz = 0;
+			return (EINVAL);
+		}
+
+		if (numvec != alloced) {
+			ppt_teardown_msix(ppt);
+			return (EINVAL);
+		}
+	}
+#endif
+	if (idx >= ppt->msix.num_msgs)
+		return (EINVAL);
 
 	if ((vector_control & PCIM_MSIX_VCTRL_MASK) == 0) {
 		/* Tear down the IRQ if it's already set up */
 		ppt_teardown_msix_intr(ppt, idx);
 
+#ifdef __FreeBSD__
 		/* Allocate the IRQ resource */
 		ppt->msix.cookie[idx] = NULL;
 		rid = ppt->msix.startrid + idx;
@@ -643,12 +933,13 @@ ppt_setup_msix(struct vm *vm, int vcpu, int bus, int slot, int func,
 							    &rid, RF_ACTIVE);
 		if (ppt->msix.res[idx] == NULL)
 			return (ENXIO);
-	
+#endif
 		ppt->msix.arg[idx].pptdev = ppt;
 		ppt->msix.arg[idx].addr = addr;
 		ppt->msix.arg[idx].msg_data = msg;
 	
 		/* Setup the MSI-X interrupt */
+#ifdef __FreeBSD__
 		error = bus_setup_intr(ppt->dev, ppt->msix.res[idx],
 				       INTR_TYPE_NET | INTR_MPSAFE,
 				       pptintr, NULL, &ppt->msix.arg[idx],
@@ -661,10 +952,49 @@ ppt_setup_msix(struct vm *vm, int vcpu, int bus, int slot, int func,
 			ppt->msix.res[idx] = NULL;
 			return (ENXIO);
 		}
+#else
+		if (ddi_intr_add_handler(ppt->msix.inth[idx], pptintr,
+		    &ppt->msix.arg[idx], NULL) != DDI_SUCCESS)
+			return (ENXIO);
+
+		(void) ddi_intr_get_cap(ppt->msix.inth[idx], &intr_cap);
+		if (intr_cap & DDI_INTR_FLAG_BLOCK)
+			error = ddi_intr_block_enable(&ppt->msix.inth[idx], 1);
+		else
+			error = ddi_intr_enable(ppt->msix.inth[idx]);
+
+		if (error != DDI_SUCCESS) {
+			ddi_intr_remove_handler(ppt->msix.inth[idx]);
+			return (ENXIO);
+		}
+#endif
 	} else {
 		/* Masked, tear it down if it's already been set up */
 		ppt_teardown_msix_intr(ppt, idx);
 	}
+
+	return (0);
+}
+
+int
+ppt_get_limits(struct vm *vm, int bus, int slot, int func, int *msilimit,
+    int *msixlimit)
+{
+	struct pptdev *ppt;
+
+	ppt = ppt_find(bus, slot, func);
+	if (ppt == NULL)
+		return (ENOENT);
+	if (ppt->vm != vm)		/* Make sure we own this device */
+		return (EBUSY);
+
+	if (ddi_intr_get_navail(ppt->dev, DDI_INTR_TYPE_MSI, msilimit) !=
+	    DDI_SUCCESS)
+		*msilimit = -1;
+
+	if (ddi_intr_get_navail(ppt->dev, DDI_INTR_TYPE_MSIX, msixlimit) !=
+	    DDI_SUCCESS)
+		*msixlimit = -1;
 
 	return (0);
 }

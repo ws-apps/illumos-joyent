@@ -41,6 +41,10 @@ __FBSDID("$FreeBSD$");
 #include <machine/cpu.h>
 #include <machine/md_var.h>
 
+#include <sys/ddi.h>
+#include <sys/sunddi.h>
+#include <sys/pci.h>
+
 #include "vmm_util.h"
 #include "vmm_mem.h"
 #include "iommu.h"
@@ -58,7 +62,9 @@ SYSCTL_INT(_hw_vmm_iommu, OID_AUTO, enable, CTLFLAG_RDTUN, &iommu_enable, 0,
 
 static struct iommu_ops *ops;
 static void *host_domain;
+#ifdef __FreeBSD__
 static eventhandler_tag add_tag, delete_tag;
+#endif
 
 static __inline int
 IOMMU_INIT(void)
@@ -154,6 +160,7 @@ IOMMU_DISABLE(void)
 		(*ops->disable)();
 }
 
+#ifdef __FreeBSD__
 static void
 iommu_pci_add(void *arg, device_t dev)
 {
@@ -167,6 +174,16 @@ iommu_pci_delete(void *arg, device_t dev)
 {
 
 	iommu_remove_device(host_domain, pci_get_rid(dev));
+}
+#endif
+
+static int
+iommu_find_device(dev_info_t *dip, void *unused)
+{
+	if (pcie_is_pci_device(dip))
+		iommu_add_device(host_domain, pci_get_rid(dip));
+
+	return (DDI_WALK_CONTINUE);
 }
 
 static void
@@ -211,6 +228,7 @@ iommu_init(void)
 	 */
 	iommu_create_mapping(host_domain, 0, 0, maxaddr);
 
+#ifdef __FreeBSD__
 	add_tag = EVENTHANDLER_REGISTER(pci_add_device, iommu_pci_add, NULL, 0);
 	delete_tag = EVENTHANDLER_REGISTER(pci_delete_device, iommu_pci_delete,
 	    NULL, 0);
@@ -227,6 +245,9 @@ iommu_init(void)
 			}
 		}
 	}
+#else
+	ddi_walk_devs(ddi_root_node(), iommu_find_device, NULL);
+#endif
 	IOMMU_ENABLE();
 
 }
@@ -234,7 +255,7 @@ iommu_init(void)
 void
 iommu_cleanup(void)
 {
-
+#ifdef __FreeBSD__
 	if (add_tag != NULL) {
 		EVENTHANDLER_DEREGISTER(pci_add_device, add_tag);
 		add_tag = NULL;
@@ -243,6 +264,7 @@ iommu_cleanup(void)
 		EVENTHANDLER_DEREGISTER(pci_delete_device, delete_tag);
 		delete_tag = NULL;
 	}
+#endif
 	IOMMU_DISABLE();
 	IOMMU_DESTROY_DOMAIN(host_domain);
 	IOMMU_CLEANUP();
@@ -251,7 +273,7 @@ iommu_cleanup(void)
 void *
 iommu_create_domain(vm_paddr_t maxaddr)
 {
-	static volatile int iommu_initted;
+	static volatile u_int iommu_initted;
 
 	if (iommu_initted < 2) {
 		if (atomic_cmpset_int(&iommu_initted, 0, 1)) {
