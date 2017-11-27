@@ -4574,6 +4574,7 @@ f usr/kernel/drv/amd64/lxautofs 0755 root sys
 f usr/kernel/drv/amd64/nsmb 0755 root sys
 f usr/kernel/drv/amd64/pm 0755 root sys
 f usr/kernel/drv/amd64/pool 0755 root sys
+f usr/kernel/drv/amd64/ppt 0755 root sys
 f usr/kernel/drv/amd64/ptm 0755 root sys
 f usr/kernel/drv/amd64/pts 0755 root sys
 f usr/kernel/drv/amd64/signalfd 0755 root sys
