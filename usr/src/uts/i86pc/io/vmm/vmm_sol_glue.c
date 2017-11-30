@@ -73,6 +73,8 @@
 #include <sys/systm.h>
 #include <sys/ddidmareq.h>
 #include <sys/id_space.h>
+#include <sys/psm_defs.h>
+#include <sys/smp_impldefs.h>
 
 #include <machine/cpufunc.h>
 #include <machine/fpu.h>
@@ -814,6 +816,39 @@ vmm_sol_glue_cleanup(void)
 	fpu_save_area_cleanup();
 	kmem_cache_destroy(vmm_sleepq_cache);
 }
+
+int idtvec_justreturn;
+
+int
+lapic_ipi_alloc(int *id)
+{
+	/* Only poke_cpu() equivalent is supported */
+	VERIFY(id == &idtvec_justreturn);
+
+	/*
+	 * This is only used by VMX to allocate a do-nothing vector for
+	 * interrupting other running CPUs.  The cached poke_cpu() vector
+	 * as an "allocation" is perfect for this.
+	 */
+	if (psm_cached_ipivect != NULL) {
+		return (psm_cached_ipivect(XC_CPUPOKE_PIL, PSM_INTR_POKE));
+	}
+
+	return (-1);
+}
+
+void
+lapic_ipi_free(int vec)
+{
+	VERIFY(vec > 0);
+
+	/*
+	 * A cached vector was used in the first place.
+	 * No deallocation is necessary
+	 */
+	return;
+}
+
 
 /* From FreeBSD's sys/kern/subr_clock.c */
 

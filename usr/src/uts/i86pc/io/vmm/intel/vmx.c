@@ -205,12 +205,18 @@ static u_int vpid_alloc_failed;
 SYSCTL_UINT(_hw_vmm_vmx, OID_AUTO, vpid_alloc_failed, CTLFLAG_RD,
 	    &vpid_alloc_failed, 0, NULL);
 
+#ifdef __FreeBSD__
 /*
  * Use the last page below 4GB as the APIC access address. This address is
  * occupied by the boot firmware so it is guaranteed that it will not conflict
  * with a page in system memory.
  */
 #define	APIC_ACCESS_ADDRESS	0xFFFFF000
+#else
+static void *vmx_apic_access_vaddr;
+static uintptr_t vmx_apic_access_paddr;
+#define	APIC_ACCESS_ADDRESS	vmx_apic_access_paddr
+#endif /* __FreeBSD__ */
 
 static int vmx_getdesc(void *arg, int vcpu, int reg, struct seg_desc *desc);
 static int vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval);
@@ -508,9 +514,15 @@ vmx_disable(void *arg __unused)
 static int
 vmx_cleanup(void)
 {
-#ifdef __FreeBSD__
 	if (pirvec >= 0)
 		lapic_ipi_free(pirvec);
+
+#ifndef __FreeBSD__
+	/* Clean up APIC_ACCESS_ADDRESS page */
+	if (vmx_apic_access_paddr != 0) {
+		vmx_apic_access_paddr = 0;
+		kmem_free(vmx_apic_access_vaddr, PAGESIZE);
+	}
 #endif
 
 	if (vpid_unr != NULL) {
@@ -706,7 +718,10 @@ vmx_init(int ipinum)
 	error = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2, MSR_VMX_PROCBASED_CTLS2,
 	    procbased2_vid_bits, 0, &tmp);
 	if (error == 0 && use_tpr_shadow) {
+#ifdef __FreeBSD__
+		/* XXXJOY: disabled until fixed and tested */
 		virtual_interrupt_delivery = 1;
+#endif
 		TUNABLE_INT_FETCH("hw.vmm.vmx.use_apic_vid",
 		    &virtual_interrupt_delivery);
 	}
@@ -731,9 +746,7 @@ vmx_init(int ipinum)
 		    MSR_VMX_TRUE_PINBASED_CTLS, PINBASED_POSTED_INTERRUPT, 0,
 		    &tmp);
 		if (error == 0) {
-#ifdef __FreeBSD__
 			pirvec = lapic_ipi_alloc(&IDTVEC(justreturn));
-#endif
 			if (pirvec < 0) {
 #ifdef __FreeBSD__
 				if (bootverbose) {
@@ -797,6 +810,11 @@ vmx_init(int ipinum)
 	for (uint_t i = 0; i < MAXCPU; i++) {
 		vmxon_region_pa[i] = (char *)vtophys(vmxon_region[i]);
 	}
+
+	/* Allocate a physical page for the APIC_ACCESS_ADDRESS */
+	vmx_apic_access_vaddr = kmem_alloc(PAGESIZE, KM_SLEEP);
+	vmx_apic_access_paddr = vtophys(vmx_apic_access_vaddr);
+
 #endif /* __FreeBSD__ */
 
 	/* enable VMX operation */

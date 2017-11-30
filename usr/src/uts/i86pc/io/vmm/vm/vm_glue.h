@@ -23,6 +23,7 @@
 struct vmspace;
 struct vm_map;
 struct pmap;
+struct vm_object;
 
 struct vm_map {
 	struct vmspace *vmm_space;
@@ -49,12 +50,16 @@ struct vmspace {
 	list_t		vms_maplist;
 };
 
+typedef pfn_t (*vm_pager_fn_t)(vm_object_t, uintptr_t, pfn_t *, uint_t *);
+
 struct vm_object {
 	kmutex_t	vmo_lock;
 	uint_t		vmo_refcnt;
 	objtype_t	vmo_type;
 	size_t		vmo_size;
-	void		*vmo_kmem;
+	vm_memattr_t	vmo_attr;
+	vm_pager_fn_t	vmo_pager;
+	void		*vmo_data;
 };
 
 struct vm_page {

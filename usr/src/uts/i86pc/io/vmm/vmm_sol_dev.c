@@ -312,7 +312,6 @@ vmmdev_devmem_segid(vmm_softc_t *sc, off_t off, off_t len, int *segidp)
 {
 	list_t *dl = &sc->vmm_devmem_list;
 	vmm_devmem_entry_t *de = NULL;
-	int err;
 
 	VERIFY(off >= VM_DEVMEM_START);
 
@@ -1212,7 +1211,7 @@ vmm_drv_rele(vmm_hold_t *hold)
 	vmm_softc_t *sc;
 
 	ASSERT(hold != NULL);
-	ASSERT(hold->vmh_softc != NULL);
+	ASSERT(hold->vmh_sc != NULL);
 
 	mutex_enter(&vmmdev_mtx);
 	sc = hold->vmh_sc;
