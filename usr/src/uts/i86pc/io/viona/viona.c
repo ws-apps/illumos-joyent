@@ -64,8 +64,6 @@
 
 #define	VTNET_MAXSEGS		32
 
-#define	VQ_MAX_DESCRIPTORS	512
-
 #define	VRING_ALIGN		4096
 #define	VRING_MAX_LEN		32768
 
@@ -89,9 +87,15 @@
 	(VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF | \
 	VIRTIO_NET_F_STATUS)
 
-
-#define	VIONA_PROBE_BAD_ADDR(addr)		\
-	DTRACE_PROBE1(viona__bad_addr, void *, (void *)(addr))
+#define	VIONA_PROBE(name)	DTRACE_PROBE(viona__##name)
+#define	VIONA_PROBE1(name, arg1, arg2)	\
+	DTRACE_PROBE1(viona__##name, arg1, arg2)
+#define	VIONA_PROBE2(name, arg1, arg2, arg3, arg4)	\
+	DTRACE_PROBE2(viona__##name, arg1, arg2, arg3, arg4)
+#define	VIONA_PROBE3(name, arg1, arg2, arg3, arg4, arg5, arg6)	\
+	DTRACE_PROBE3(viona__##name, arg1, arg2, arg3, arg4, arg5, arg6)
+#define	VIONA_PROBE_BAD_RING_ADDR(r, a)		\
+	VIONA_PROBE2(bad_ring_addr, viona_vring_t *, r, void *, (void *)(a))
 
 #pragma pack(1)
 struct virtio_desc {
@@ -129,29 +133,34 @@ struct virtio_net_hdr {
 };
 #pragma pack()
 
-typedef struct viona_vring_hqueue {
+struct viona_link;
+typedef struct viona_link viona_link_t;
+
+typedef struct viona_vring {
 	/* Internal state */
-	kmutex_t		hq_a_mutex;
-	kmutex_t		hq_u_mutex;
-	uint16_t		hq_size;
-	uint16_t		hq_cur_aidx;	/* trails behind 'avail_idx' */
+	kmutex_t		vr_a_mutex;
+	kmutex_t		vr_u_mutex;
+	viona_link_t		*vr_link;
+
+	uint16_t		vr_size;
+	uint16_t		vr_mask;	/* cached from vr_size */
+	uint16_t		vr_cur_aidx;	/* trails behind 'avail_idx' */
 
 	/* Host-context pointers to the queue */
-	volatile struct virtio_desc	*hq_descr;
+	volatile struct virtio_desc	*vr_descr;
 
-	volatile uint16_t		*hq_avail_flags;
-	volatile uint16_t		*hq_avail_idx;
-	volatile uint16_t		*hq_avail_ring;
-	volatile uint16_t		*hq_avail_used_event;
+	volatile uint16_t		*vr_avail_flags;
+	volatile uint16_t		*vr_avail_idx;
+	volatile uint16_t		*vr_avail_ring;
+	volatile uint16_t		*vr_avail_used_event;
 
-	volatile uint16_t		*hq_used_flags;
-	volatile uint16_t		*hq_used_idx;
-	volatile struct virtio_used	*hq_used_ring;
-	volatile uint16_t		*hq_used_avail_event;
-} viona_vring_hqueue_t;
+	volatile uint16_t		*vr_used_flags;
+	volatile uint16_t		*vr_used_idx;
+	volatile struct virtio_used	*vr_used_ring;
+	volatile uint16_t		*vr_used_avail_event;
+} viona_vring_t;
 
-
-typedef struct viona_link {
+struct viona_link {
 	datalink_id_t		l_linkid;
 
 	vmm_hold_t		*l_vm_hold;
@@ -161,16 +170,16 @@ typedef struct viona_link {
 
 	pollhead_t		l_pollhead;
 
-	viona_vring_hqueue_t	l_rx_vring;
+	viona_vring_t		l_rx_vring;
 	uint_t			l_rx_intr;
 
-	viona_vring_hqueue_t	l_tx_vring;
+	viona_vring_t		l_tx_vring;
 	kcondvar_t		l_tx_cv;
 	uint_t			l_tx_intr;
 	kmutex_t		l_tx_mutex;
 	int			l_tx_outstanding;
 	uint32_t		l_features;
-} viona_link_t;
+};
 
 typedef struct {
 	frtn_t			d_frtn;
@@ -217,7 +226,7 @@ static int viona_ioc_delete(viona_soft_state_t *ss);
 
 static void *viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len);
 
-static int viona_ioc_ring_init(viona_link_t *, viona_vring_hqueue_t *,
+static int viona_ioc_ring_init(viona_link_t *, viona_vring_t *,
     void *, int);
 static int viona_ioc_rx_ring_reset(viona_link_t *link);
 static int viona_ioc_tx_ring_reset(viona_link_t *link);
@@ -228,7 +237,7 @@ static int viona_ioc_tx_intr_clear(viona_link_t *link);
 
 static void viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
     boolean_t loopback);
-static void viona_tx(viona_link_t *link, viona_vring_hqueue_t *hq);
+static void viona_tx(viona_link_t *link, viona_vring_t *ring);
 
 static struct cb_ops viona_cb_ops = {
 	viona_open,
@@ -571,10 +580,12 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 
 	link->l_features = VIONA_S_HOSTCAPS;
 
-	mutex_init(&link->l_rx_vring.hq_a_mutex, NULL, MUTEX_DRIVER, NULL);
-	mutex_init(&link->l_rx_vring.hq_u_mutex, NULL, MUTEX_DRIVER, NULL);
-	mutex_init(&link->l_rx_vring.hq_a_mutex, NULL, MUTEX_DRIVER, NULL);
-	mutex_init(&link->l_tx_vring.hq_u_mutex, NULL, MUTEX_DRIVER, NULL);
+	link->l_rx_vring.vr_link = link;
+	link->l_tx_vring.vr_link = link;
+	mutex_init(&link->l_rx_vring.vr_a_mutex, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&link->l_rx_vring.vr_u_mutex, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&link->l_rx_vring.vr_a_mutex, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&link->l_tx_vring.vr_u_mutex, NULL, MUTEX_DRIVER, NULL);
 	if (copy_tx_mblks) {
 		mutex_init(&link->l_tx_mutex, NULL, MUTEX_DRIVER, NULL);
 		cv_init(&link->l_tx_cv, NULL, CV_DRIVER, NULL);
@@ -626,10 +637,10 @@ viona_ioc_delete(viona_soft_state_t *ss)
 		link->l_vm_hold = NULL;
 	}
 
-	mutex_destroy(&link->l_tx_vring.hq_a_mutex);
-	mutex_destroy(&link->l_tx_vring.hq_u_mutex);
-	mutex_destroy(&link->l_rx_vring.hq_a_mutex);
-	mutex_destroy(&link->l_rx_vring.hq_u_mutex);
+	mutex_destroy(&link->l_tx_vring.vr_a_mutex);
+	mutex_destroy(&link->l_tx_vring.vr_u_mutex);
+	mutex_destroy(&link->l_rx_vring.vr_a_mutex);
+	mutex_destroy(&link->l_rx_vring.vr_u_mutex);
 	if (copy_tx_mblks) {
 		mutex_destroy(&link->l_tx_mutex);
 		cv_destroy(&link->l_tx_cv);
@@ -652,8 +663,7 @@ viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len)
 }
 
 static int
-viona_ioc_ring_init(viona_link_t *link, viona_vring_hqueue_t *hq,
-    void *u_ri, int md)
+viona_ioc_ring_init(viona_link_t *link, viona_vring_t *ring, void *u_ri, int md)
 {
 	vioc_ring_init_t	kri;
 	uintptr_t		pos;
@@ -674,44 +684,45 @@ viona_ioc_ring_init(viona_link_t *link, viona_vring_hqueue_t *hq,
 	avail_sz = (cnt + 3) * sizeof (uint16_t);
 	used_sz = (cnt * sizeof (struct virtio_used)) + (sizeof (uint16_t) * 3);
 
-	hq->hq_size = kri.ri_qsize;
-	hq->hq_descr = viona_gpa2kva(link, pos, desc_sz);
-	if (hq->hq_descr == NULL) {
+	ring->vr_size = kri.ri_qsize;
+	ring->vr_mask = (ring->vr_size - 1);
+	ring->vr_descr = viona_gpa2kva(link, pos, desc_sz);
+	if (ring->vr_descr == NULL) {
 		return (EINVAL);
 	}
 	pos += desc_sz;
 
-	hq->hq_avail_flags = viona_gpa2kva(link, pos, avail_sz);
-	if (hq->hq_avail_flags == NULL) {
+	ring->vr_avail_flags = viona_gpa2kva(link, pos, avail_sz);
+	if (ring->vr_avail_flags == NULL) {
 		return (EINVAL);
 	}
-	hq->hq_avail_idx = hq->hq_avail_flags + 1;
-	hq->hq_avail_ring = hq->hq_avail_flags + 2;
-	hq->hq_avail_used_event = hq->hq_avail_ring + cnt;
+	ring->vr_avail_idx = ring->vr_avail_flags + 1;
+	ring->vr_avail_ring = ring->vr_avail_flags + 2;
+	ring->vr_avail_used_event = ring->vr_avail_ring + cnt;
 	pos += avail_sz;
 
 	pos = P2ROUNDUP(pos, VRING_ALIGN);
-	hq->hq_used_flags = viona_gpa2kva(link, pos, used_sz);
-	if (hq->hq_used_flags == NULL) {
+	ring->vr_used_flags = viona_gpa2kva(link, pos, used_sz);
+	if (ring->vr_used_flags == NULL) {
 		return (EINVAL);
 	}
-	hq->hq_used_idx = hq->hq_used_flags + 1;
-	hq->hq_used_ring = (struct virtio_used *)(hq->hq_used_flags + 2);
-	hq->hq_used_avail_event = (uint16_t *)(hq->hq_used_ring + cnt);
+	ring->vr_used_idx = ring->vr_used_flags + 1;
+	ring->vr_used_ring = (struct virtio_used *)(ring->vr_used_flags + 2);
+	ring->vr_used_avail_event = (uint16_t *)(ring->vr_used_ring + cnt);
 
 	/* Initialize queue indexes */
-	hq->hq_cur_aidx = 0;
+	ring->vr_cur_aidx = 0;
 
 	return (0);
 }
 
 static int
-viona_ioc_ring_reset_common(viona_vring_hqueue_t *hq)
+viona_ioc_ring_reset_common(viona_vring_t *ring)
 {
 	/*
 	 * Reset all soft state
 	 */
-	hq->hq_cur_aidx = 0;
+	ring->vr_cur_aidx = 0;
 
 	return (0);
 }
@@ -719,31 +730,31 @@ viona_ioc_ring_reset_common(viona_vring_hqueue_t *hq)
 static int
 viona_ioc_rx_ring_reset(viona_link_t *link)
 {
-	viona_vring_hqueue_t	*hq;
+	viona_vring_t	*ring;
 
 	mac_rx_clear(link->l_mch);
 
-	hq = &link->l_rx_vring;
+	ring = &link->l_rx_vring;
 
-	return (viona_ioc_ring_reset_common(hq));
+	return (viona_ioc_ring_reset_common(ring));
 }
 
 static int
 viona_ioc_tx_ring_reset(viona_link_t *link)
 {
-	viona_vring_hqueue_t	*hq;
+	viona_vring_t	*ring;
 
-	hq = &link->l_tx_vring;
+	ring = &link->l_tx_vring;
 
-	return (viona_ioc_ring_reset_common(hq));
+	return (viona_ioc_ring_reset_common(ring));
 }
 
 static void
 viona_ioc_rx_ring_kick(viona_link_t *link)
 {
-	viona_vring_hqueue_t	*hq = &link->l_rx_vring;
+	viona_vring_t	*ring = &link->l_rx_vring;
 
-	atomic_or_16(hq->hq_used_flags, VRING_USED_F_NO_NOTIFY);
+	atomic_or_16(ring->vr_used_flags, VRING_USED_F_NO_NOTIFY);
 
 	mac_rx_set(link->l_mch, viona_rx, link);
 }
@@ -753,7 +764,7 @@ viona_ioc_rx_ring_kick(viona_link_t *link)
  * of the 16-bit index wraparound.
  */
 static inline int
-viona_hq_num_avail(viona_vring_hqueue_t *hq)
+viona_vr_num_avail(viona_vring_t *ring)
 {
 	uint16_t ndesc;
 
@@ -765,9 +776,9 @@ viona_hq_num_avail(viona_vring_hqueue_t *hq)
 	 * more than 16 bits (pretty much always now), so
 	 * we have to force it back to unsigned.
 	 */
-	ndesc = (unsigned)*hq->hq_avail_idx - (unsigned)hq->hq_cur_aidx;
+	ndesc = (unsigned)*ring->vr_avail_idx - (unsigned)ring->vr_cur_aidx;
 
-	ASSERT(ndesc <= hq->hq_size);
+	ASSERT(ndesc <= ring->vr_size);
 
 	return (ndesc);
 }
@@ -775,12 +786,12 @@ viona_hq_num_avail(viona_vring_hqueue_t *hq)
 static void
 viona_ioc_tx_ring_kick(viona_link_t *link)
 {
-	viona_vring_hqueue_t	*hq = &link->l_tx_vring;
+	viona_vring_t	*ring = &link->l_tx_vring;
 
 	do {
-		atomic_or_16(hq->hq_used_flags, VRING_USED_F_NO_NOTIFY);
-		while (viona_hq_num_avail(hq)) {
-			viona_tx(link, hq);
+		atomic_or_16(ring->vr_used_flags, VRING_USED_F_NO_NOTIFY);
+		while (viona_vr_num_avail(ring)) {
+			viona_tx(link, ring);
 		}
 		if (copy_tx_mblks) {
 			mutex_enter(&link->l_tx_mutex);
@@ -789,8 +800,8 @@ viona_ioc_tx_ring_kick(viona_link_t *link)
 			}
 			mutex_exit(&link->l_tx_mutex);
 		}
-		atomic_and_16(hq->hq_used_flags, ~VRING_USED_F_NO_NOTIFY);
-	} while (viona_hq_num_avail(hq));
+		atomic_and_16(ring->vr_used_flags, ~VRING_USED_F_NO_NOTIFY);
+	} while (viona_vr_num_avail(ring));
 }
 
 static int
@@ -810,55 +821,65 @@ viona_ioc_tx_intr_clear(viona_link_t *link)
 }
 
 static int
-vq_popchain(viona_link_t *link, viona_vring_hqueue_t *hq, struct iovec *iov,
-    int n_iov, uint16_t *cookie)
+vq_popchain(viona_vring_t *ring, struct iovec *iov, int niov, uint16_t *cookie)
 {
+	viona_link_t *link = ring->vr_link;
 	uint_t i, ndesc, idx, head, next;
 	struct virtio_desc vdir;
+	void *buf;
 
-	idx = hq->hq_cur_aidx;
-	ndesc = (uint16_t)((unsigned)*hq->hq_avail_idx - (unsigned)idx);
+	ASSERT(iov != NULL);
+	ASSERT(niov > 0);
 
-	if (ndesc == 0)
+	mutex_enter(&ring->vr_a_mutex);
+	idx = ring->vr_cur_aidx;
+	ndesc = (uint16_t)((unsigned)*ring->vr_avail_idx - (unsigned)idx);
+
+	if (ndesc == 0) {
+		mutex_exit(&ring->vr_a_mutex);
 		return (0);
-	if (ndesc > hq->hq_size) {
-		DTRACE_PROBE1(viona__ndesc_to_high, uint16_t, ndesc);
+	}
+	if (ndesc > ring->vr_size) {
+		VIONA_PROBE2(ndesc_too_high, viona_vring_t *, ring,
+		    uint16_t, ndesc);
+		mutex_exit(&ring->vr_a_mutex);
 		return (-1);
 	}
 
-	head = hq->hq_avail_ring[idx & (hq->hq_size - 1)];
+	head = ring->vr_avail_ring[idx & ring->vr_mask];
 	next = head;
 
-	for (i = 0; i < VQ_MAX_DESCRIPTORS; next = vdir.vd_next) {
-		if (next >= hq->hq_size) {
-			DTRACE_PROBE1(viona__bad_idx, uint16_t, next);
-			return (-1);
+	for (i = 0; i < niov; next = vdir.vd_next) {
+		if (next >= ring->vr_size) {
+			VIONA_PROBE2(bad_idx, viona_vring_t *, ring,
+			    uint16_t, next);
+			goto bail;
 		}
 
-		vdir = hq->hq_descr[next];
+		vdir = ring->vr_descr[next];
 		if ((vdir.vd_flags & VRING_DESC_F_INDIRECT) == 0) {
-			if (i > n_iov)
-				return (-1);
-			iov[i].iov_base = viona_gpa2kva(link, vdir.vd_addr,
-			    vdir.vd_len);
-			if (iov[i].iov_base == NULL) {
-				VIONA_PROBE_BAD_ADDR(vdir.vd_addr);
-				return (-1);
+			buf = viona_gpa2kva(link, vdir.vd_addr, vdir.vd_len);
+			if (buf == NULL) {
+				VIONA_PROBE_BAD_RING_ADDR(ring, vdir.vd_addr);
+				goto bail;
 			}
-			iov[i++].iov_len = vdir.vd_len;
+			iov[i].iov_base = buf;
+			iov[i].iov_len = vdir.vd_len;
+			i++;
 		} else {
 			const uint_t nindir = vdir.vd_len / 16;
 			volatile struct virtio_desc *vindir;
 
 			if ((vdir.vd_len & 0xf) || nindir == 0) {
-				DTRACE_PROBE1(viona__indir_bad_len,
+				VIONA_PROBE2(indir_bad_len,
+				    viona_vring_t *, ring,
 				    uint32_t, vdir.vd_len);
-				return (-1);
+				goto bail;
 			}
 			vindir = viona_gpa2kva(link, vdir.vd_addr, vdir.vd_len);
 			if (vindir == NULL) {
-				VIONA_PROBE_BAD_ADDR(vdir.vd_addr);
-				return (-1);
+				VIONA_PROBE_BAD_RING_ADDR(ring, vdir.vd_addr);
+				goto bail;
 			}
 			next = 0;
 			for (;;) {
@@ -866,341 +887,419 @@ vq_popchain(viona_link_t *link, viona_vring_hqueue_t *hq, struct iovec *iov,
 
 				vp = vindir[next];
 				if (vp.vd_flags & VRING_DESC_F_INDIRECT) {
-					DTRACE_PROBE(viona__indir_bad_nest);
-					return (-1);
+					VIONA_PROBE1(indir_bad_nest,
+					    viona_vring_t *, ring);
+					goto bail;
 				}
-				if (i > n_iov)
-					return (-1);
-				iov[i].iov_base = viona_gpa2kva(link,
-				    vp.vd_addr, vp.vd_len);
-				if (iov[i].iov_base == NULL) {
-					VIONA_PROBE_BAD_ADDR(vp.vd_addr);
-					return (-1);
+				buf = viona_gpa2kva(link, vp.vd_addr,
+				    vp.vd_len);
+				if (buf == NULL) {
+					VIONA_PROBE_BAD_RING_ADDR(ring,
+					    vp.vd_addr);
+					goto bail;
 				}
-				iov[i++].iov_len = vp.vd_len;
+				iov[i].iov_base = buf;
+				iov[i].iov_len = vp.vd_len;
+				i++;
 
-				if (i > VQ_MAX_DESCRIPTORS)
-					goto loopy;
 				if ((vp.vd_flags & VRING_DESC_F_NEXT) == 0)
 					break;
+				if (i >= niov) {
+					goto loopy;
+				}
 
 				next = vp.vd_next;
 				if (next >= nindir) {
-					DTRACE_PROBE2(viona__indir_bad_next,
-					    uint16_t, next, uint_t, nindir);
-					return (-1);
+					VIONA_PROBE3(indir_bad_next,
+					    viona_vring_t *, ring,
+					    uint16_t, next,
+					    uint_t, nindir);
+					goto bail;
 				}
 			}
 		}
 		if ((vdir.vd_flags & VRING_DESC_F_NEXT) == 0) {
 			*cookie = head;
-			hq->hq_cur_aidx++;
+			ring->vr_cur_aidx++;
+			mutex_exit(&ring->vr_a_mutex);
 			return (i);
 		}
 	}
 
 loopy:
-	DTRACE_PROBE1(viona__bad_loop_count, uint_t, i);
+	VIONA_PROBE1(too_many_desc, viona_vring_t *, ring);
+bail:
+	mutex_exit(&ring->vr_a_mutex);
 	return (-1);
 }
 
 static void
-vq_pushchain(viona_vring_hqueue_t *hq, uint32_t len, uint16_t cookie)
+vq_pushchain(viona_vring_t *ring, uint32_t len, uint16_t cookie)
 {
 	volatile struct virtio_used *vu;
 	uint_t uidx;
 
-	uidx = *hq->hq_used_idx;
-	vu = &hq->hq_used_ring[uidx++ & (hq->hq_size - 1)];
+	mutex_enter(&ring->vr_u_mutex);
+
+	uidx = *ring->vr_used_idx;
+	vu = &ring->vr_used_ring[uidx++ & ring->vr_mask];
 	vu->vu_idx = cookie;
 	vu->vu_tlen = len;
 	membar_producer();
-	*hq->hq_used_idx = uidx;
+	*ring->vr_used_idx = uidx;
+
+	mutex_exit(&ring->vr_u_mutex);
 }
 
 static void
-vq_pushchain_mrgrx(viona_vring_hqueue_t *hq, int num_bufs, used_elem_t *elem)
+vq_pushchain_mrgrx(viona_vring_t *ring, int num_bufs, used_elem_t *elem)
 {
 	volatile struct virtio_used *vu;
 	uint_t uidx, i;
 
-	uidx = *hq->hq_used_idx;
+	mutex_enter(&ring->vr_u_mutex);
+
+	uidx = *ring->vr_used_idx;
 	if (num_bufs == 1) {
-		vu = &hq->hq_used_ring[uidx++ & (hq->hq_size - 1)];
+		vu = &ring->vr_used_ring[uidx++ & ring->vr_mask];
 		vu->vu_idx = elem[0].id;
 		vu->vu_tlen = elem[0].len;
 	} else {
 		for (i = 0; i < num_bufs; i++) {
-			vu = &hq->hq_used_ring[(uidx + i) & (hq->hq_size - 1)];
+			vu = &ring->vr_used_ring[(uidx + i) & ring->vr_mask];
 			vu->vu_idx = elem[i].id;
 			vu->vu_tlen = elem[i].len;
 		}
 		uidx = uidx + num_bufs;
 	}
 	membar_producer();
-	*hq->hq_used_idx = uidx;
+	*ring->vr_used_idx = uidx;
+
+	mutex_exit(&ring->vr_u_mutex);
 }
 
-/*
- * Copy bytes from mp to iov.
- * copied_buf: Total num_bytes copied from mblk to iov array.
- * buf: pointer to iov_base.
- * i: index of iov array. Mainly used to identify if we are
- *    dealing with first iov array element.
- * rxhdr_size: Virtio header size. Two possibilities in case
- *    of MRGRX buf, header has 2 additional bytes.
- *    In case of mrgrx, virtio header should be part of iov[0].
- *    In case of non-mrgrx, virtio header may or may not be part
- *    of iov[0].
- */
-static int
-copy_in_mblk(mblk_t *mp, int copied_buf, caddr_t buf, struct iovec *iov,
-    int i, int rxhdr_size)
+static size_t
+viona_copy_mblk(mblk_t *mp, size_t seek, caddr_t buf, size_t len,
+    boolean_t *end)
 {
-	int copied_chunk = 0;
-	mblk_t *ml;
-	int total_buf_len = iov->iov_len;
-	/*
-	 * iov[0] might have header, adjust
-	 * total_buf_len accordingly
-	 */
-	if (i == 0) {
-		total_buf_len = iov->iov_len - rxhdr_size;
-	}
-	for (ml = mp; ml != NULL; ml = ml->b_cont) {
-		size_t	chunk = MBLKL(ml);
-		/*
-		 * If chunk is less than
-		 * copied_buf we should move
-		 * to correct msgblk
-		 */
-		if (copied_buf != 0) {
-			if (copied_buf < chunk) {
-				chunk -= copied_buf;
-			} else {
-				copied_buf -= chunk;
-				continue;
-			}
-		}
-		/*
-		 * iov[0] already has virtio header.
-		 * and if copied chunk is length of iov_len break
-		 */
-		if (copied_chunk == total_buf_len) {
+	size_t copied = 0;
+	size_t off = 0;
+
+	/* Seek past already-consumed data */
+	while (seek > 0 && mp != NULL) {
+		size_t chunk = MBLKL(mp);
+
+		if (chunk > seek) {
+			off = seek;
 			break;
 		}
-		/*
-		 * Sometimes chunk is total mblk len, sometimes mblk is
-		 * divided into multiple chunks.
-		 */
-		if (chunk > copied_buf) {
-			if (chunk > copied_chunk) {
-				if ((chunk + copied_chunk) > total_buf_len)
-					chunk = (size_t)total_buf_len
-					    - copied_chunk;
-			} else {
-				if (chunk > (total_buf_len - copied_chunk))
-					chunk = (size_t)((total_buf_len
-					    - copied_chunk) - chunk);
-			}
-			bcopy(ml->b_rptr + copied_buf, buf, chunk);
-		} else {
-			if (chunk > (total_buf_len - copied_chunk)) {
-				chunk = (size_t)(total_buf_len - copied_chunk);
-			}
-			bcopy(ml->b_rptr + copied_buf, buf, chunk);
-		}
-		buf += chunk;
-		copied_chunk += chunk;
+		mp = mp->b_cont;
+		seek -= chunk;
 	}
-	return (copied_chunk);
+
+	while (mp != NULL) {
+		const size_t chunk = MBLKL(mp) - off;
+		const size_t to_copy = MIN(chunk, len);
+
+		bcopy(mp->b_rptr + off, buf, to_copy);
+		copied += to_copy;
+		buf += to_copy;
+		len -= to_copy;
+
+		/* Go no further if the buffer has been filled */
+		if (len == 0) {
+			break;
+		}
+
+		/*
+		 * Any offset into the initially chosen mblk_t buffer is
+		 * consumed on the first copy operation.
+		 */
+		off = 0;
+		mp = mp->b_cont;
+	}
+	*end = (mp == NULL);
+	return (copied);
+}
+
+static int
+viona_recv_plain(viona_vring_t *ring, mblk_t *mp, size_t msz)
+{
+	struct iovec iov[VTNET_MAXSEGS];
+	uint16_t cookie;
+	int n;
+	const size_t hdr_sz = sizeof (struct virtio_net_hdr);
+	struct virtio_net_hdr *hdr;
+	size_t len, copied = 0;
+	caddr_t buf = NULL;
+	boolean_t end = B_FALSE;
+
+	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
+	if (n <= 0) {
+		/* Without available buffers, the frame must be dropped. */
+		return (ENOSPC);
+	}
+	if (iov[0].iov_len < hdr_sz) {
+		/*
+		 * There is little to do if there is not even space available
+		 * for the sole header.  Zero the buffer and bail out as a last
+		 * act of desperation.
+		 */
+		bzero(iov[0].iov_base, iov[0].iov_len);
+		goto bad_frame;
+	}
+
+	/* Grab the address of the header before anything else */
+	hdr = (struct virtio_net_hdr *)iov[0].iov_base;
+
+	/*
+	 * If there is any space remaining in the first buffer after writing
+	 * the header, fill it with frame data.
+	 */
+	if (iov[0].iov_len > hdr_sz) {
+		buf = (caddr_t)iov[0].iov_base + hdr_sz;
+		len = iov[0].iov_len - hdr_sz;
+
+		copied += viona_copy_mblk(mp, copied, buf, len, &end);
+	}
+
+	/* Copy any remaining data into subsequent buffers, if present */
+	for (int i = 1; i < n && !end; i++) {
+		buf = (caddr_t)iov[i].iov_base;
+		len = iov[i].iov_len;
+
+		copied += viona_copy_mblk(mp, copied, buf, len, &end);
+	}
+
+	/*
+	 * Is the copied data long enough to be considered an ethernet frame of
+	 * the minimum length?  Does it match the total length of the mblk?
+	 */
+	if (copied < MIN_BUF_SIZE || copied != msz) {
+		goto bad_frame;
+	}
+
+	/* Populate (read: zero) the header and account for it in the size */
+	bzero(hdr, hdr_sz);
+	copied += hdr_sz;
+
+	/* Release this chain */
+	vq_pushchain(ring, copied, cookie);
+	return (0);
+
+bad_frame:
+	VIONA_PROBE3(bad_rx_frame, viona_vring_t *, ring, uint16_t, cookie,
+	    mblk_t *, mp);
+	vq_pushchain(ring, MAX(copied, MIN_BUF_SIZE + hdr_sz), cookie);
+	return (EINVAL);
+}
+
+static int
+viona_recv_merged(viona_vring_t *ring, mblk_t *mp, size_t msz)
+{
+	struct iovec iov[VTNET_MAXSEGS];
+	used_elem_t uelem[VTNET_MAXSEGS];
+	int n, i = 0, buf_idx = 0, err = 0;
+	uint16_t cookie;
+	caddr_t buf;
+	size_t len, copied = 0, chunk = 0;
+	struct virtio_net_mrgrxhdr *hdr = NULL;
+	const size_t hdr_sz = sizeof (struct virtio_net_mrgrxhdr);
+	boolean_t end = B_FALSE;
+
+	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
+	if (n <= 0) {
+		/* Without available buffers, the frame must be dropped. */
+		return (ENOSPC);
+	}
+	if (iov[0].iov_len < hdr_sz) {
+		/*
+		 * There is little to do if there is not even space available
+		 * for the sole header.  Zero the buffer and bail out as a last
+		 * act of desperation.
+		 */
+		bzero(iov[0].iov_base, iov[0].iov_len);
+		uelem[0].id = cookie;
+		uelem[0].len = iov[0].iov_len;
+		err = EINVAL;
+		goto done;
+	}
+
+	/* Grab the address of the header and do initial population */
+	hdr = (struct virtio_net_mrgrxhdr *)iov[0].iov_base;
+	bzero(hdr, hdr_sz);
+	hdr->vrh_bufs = 1;
+
+	/*
+	 * If there is any space remaining in the first buffer after writing
+	 * the header, fill it with frame data.
+	 */
+	if (iov[0].iov_len > hdr_sz) {
+		buf = iov[0].iov_base + hdr_sz;
+		len = iov[0].iov_len - hdr_sz;
+
+		chunk += viona_copy_mblk(mp, copied, buf, len, &end);
+		copied += chunk;
+	}
+	i = 1;
+
+	do {
+		while (i < n && !end) {
+			buf = iov[i].iov_base;
+			len = iov[i].iov_len;
+
+			chunk += viona_copy_mblk(mp, copied, buf, len, &end);
+			copied += chunk;
+			i++;
+		}
+
+		uelem[buf_idx].id = cookie;
+		uelem[buf_idx].len = chunk;
+
+		/*
+		 * Try to grab another buffer from the ring if the mblk has not
+		 * yet been entirely copied out.
+		 */
+		if (!end) {
+			if (buf_idx == (VTNET_MAXSEGS - 1)) {
+				/*
+				 * Our arbitrary limit on the number of buffers
+				 * to offer for merge has already been reached.
+				 */
+				err = EOVERFLOW;
+				break;
+			}
+			n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
+			if (n <= 0) {
+				/*
+				 * Without more immediate space to perform the
+				 * copying, there is little choice left but to
+				 * drop the packet.
+				 */
+				err = EMSGSIZE;
+			}
+			chunk = 0;
+			i = 0;
+			buf_idx++;
+			/*
+			 * Keep the header up-to-date with the number of
+			 * buffers, but never reference its value since the
+			 * guest could meddle with it.
+			 */
+			hdr->vrh_bufs++;
+		}
+	} while (!end && copied < msz);
+
+	/* Account for the header size in the first buffer */
+	uelem[0].len += hdr_sz;
+
+	/*
+	 * Is the copied data long enough to be considered an ethernet frame of
+	 * the minimum length?  Does it match the total length of the mblk?
+	 */
+	if (copied < MIN_BUF_SIZE || copied != msz) {
+		/* Do not override an existing error */
+		err = (err == 0) ? EINVAL : err;
+	}
+
+done:
+	switch (err) {
+	case 0:
+		/* Success can fall right through to ring delivery */
+		break;
+
+	case EMSGSIZE:
+		VIONA_PROBE3(rx_merge_underrun, viona_vring_t *, ring,
+		    uint16_t, cookie, mblk_t *, mp);
+		break;
+
+	case EOVERFLOW:
+		VIONA_PROBE3(rx_merge_overrun, viona_vring_t *, ring,
+		    uint16_t, cookie, mblk_t *, mp);
+		break;
+
+	default:
+		VIONA_PROBE3(bad_rx_frame, viona_vring_t *, ring,
+		    uint16_t, cookie, mblk_t *, mp);
+	}
+	vq_pushchain_mrgrx(ring, buf_idx + 1, uelem);
+	return (err);
 }
 
 static void
-viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
-    boolean_t loopback)
+viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 {
-	viona_link_t		*link = arg;
-	viona_vring_hqueue_t	*hq = &link->l_rx_vring;
-	mblk_t			*mp0 = mp;
+	viona_link_t *link = (viona_link_t *)arg;
+	viona_vring_t *ring = &link->l_rx_vring;
+	mblk_t *mprx = NULL, **mprx_prevp = &mprx;
+	mblk_t *mpdrop = NULL, **mpdrop_prevp = &mpdrop;
+	const boolean_t do_merge =
+	    ((link->l_features & VIRTIO_NET_F_MRG_RXBUF) != 0);
+	size_t nrx = 0, ndrop = 0;
 
-	while (viona_hq_num_avail(hq)) {
-		struct iovec		iov[VTNET_MAXSEGS];
-		size_t			mblklen;
-		int			n, i = 0;
-		uint16_t		cookie;
-		struct virtio_net_hdr	*vrx = NULL;
-		struct virtio_net_mrgrxhdr *vmrgrx = NULL;
-		caddr_t			buf = NULL;
-		int			total_len = 0;
-		int			copied_buf = 0;
-		int			num_bufs = 0;
-		int			num_pops = 0;
-		used_elem_t		uelem[VTNET_MAXSEGS];
+	while (mp != NULL) {
+		mblk_t *next  = mp->b_next;
+		const size_t size = msgsize(mp);
+		int err = 0;
 
-		if (mp == NULL) {
-			break;
-		}
-		mblklen = msgsize(mp);
-		if (mblklen == 0) {
-			break;
+		mp->b_next = NULL;
+		if (do_merge) {
+			err = viona_recv_merged(ring, mp, size);
+		} else {
+			err = viona_recv_plain(ring, mp, size);
 		}
 
-		mutex_enter(&hq->hq_a_mutex);
-		n = vq_popchain(link, hq, iov, VTNET_MAXSEGS, &cookie);
-		mutex_exit(&hq->hq_a_mutex);
-		if (n <= 0) {
-			break;
-		}
-		num_pops++;
-		if (link->l_features & VIRTIO_NET_F_MRG_RXBUF) {
-			int total_n = n;
-			int mrgrxhdr_size = sizeof (struct virtio_net_mrgrxhdr);
+		if (err != 0) {
+			*mpdrop_prevp = mp;
+			mpdrop_prevp = &mp->b_next;
+
 			/*
-			 * Get a pointer to the rx header, and use the
-			 * data immediately following it for the packet buffer.
+			 * If the available ring is empty, do not bother
+			 * attempting to deliver any more frames.  Count the
+			 * rest as dropped too.
 			 */
-			vmrgrx = (struct virtio_net_mrgrxhdr *)iov[0].iov_base;
-			if (n == 1) {
-				buf = iov[0].iov_base + mrgrxhdr_size;
-			}
-			while (mblklen > copied_buf) {
-				if (total_n == i) {
-					mutex_enter(&hq->hq_a_mutex);
-					n = vq_popchain(link, hq, &iov[i],
-					    VTNET_MAXSEGS, &cookie);
-					mutex_exit(&hq->hq_a_mutex);
-					if (n <= 0) {
-						freemsgchain(mp0);
-						return;
-					}
-					num_pops++;
-					total_n += n;
-				}
-				if (total_n > i) {
-					int copied_chunk = 0;
-					if (i != 0) {
-						buf = iov[i].iov_base;
-					}
-					copied_chunk = copy_in_mblk(mp,
-					    copied_buf, buf, &iov[i], i,
-					    mrgrxhdr_size);
-					copied_buf += copied_chunk;
-					uelem[i].id = cookie;
-					uelem[i].len = copied_chunk;
-					if (i == 0) {
-						uelem[i].len += mrgrxhdr_size;
-					}
-				}
-				num_bufs++;
-				i++;
+			if (err == ENOSPC) {
+				mp->b_next = next;
+				break;
 			}
 		} else {
-			boolean_t virt_hdr_incl_iov = B_FALSE;
-			int rxhdr_size = sizeof (struct virtio_net_hdr);
-			/* First element is header */
-			vrx = (struct virtio_net_hdr *)iov[0].iov_base;
-			if (n == 1 || iov[0].iov_len > rxhdr_size) {
-				buf = iov[0].iov_base + rxhdr_size;
-				virt_hdr_incl_iov = B_TRUE;
-				total_len += rxhdr_size;
-				if (iov[0].iov_len < rxhdr_size) {
-					// Buff too small to fit pkt. Drop it.
-					freemsgchain(mp0);
-					return;
-				}
-			} else {
-				total_len = iov[0].iov_len;
-			}
-			if (iov[0].iov_len == rxhdr_size)
-				i++;
-			while (mblklen > copied_buf) {
-				if (n > i) {
-					int copied_chunk = 0;
-					if (i != 0) {
-						buf = iov[i].iov_base;
-					}
-					/*
-					 * In case of non-mrgrx buf, first
-					 * descriptor always has header and
-					 * rest of the descriptors have data.
-					 * But it is not guaranteed that first
-					 * descriptor will only have virtio
-					 * header. It might also have data.
-					 */
-					if (virt_hdr_incl_iov) {
-						copied_chunk = copy_in_mblk(mp,
-						    copied_buf, buf, &iov[i],
-						    i, rxhdr_size);
-					} else {
-						copied_chunk = copy_in_mblk(mp,
-						    copied_buf, buf, &iov[i],
-						    i, 0);
-					}
-					copied_buf += copied_chunk;
-					total_len += copied_chunk;
-				} else {
-					/*
-					 * Drop packet as it cant fit
-					 * in buf provided by guest.
-					 */
-					freemsgchain(mp0);
-					return;
-				}
-				i++;
-			}
+			/* Chain successful mblks to be freed later */
+			*mprx_prevp = mp;
+			mprx_prevp = &mp->b_next;
+			nrx++;
 		}
-		/*
-		 * The only valid field in the rx packet header is the
-		 * number of buffers, which is always 1 without TSO
-		 * support.
-		 */
-		if (link->l_features & VIRTIO_NET_F_MRG_RXBUF) {
-			memset(vmrgrx, 0, sizeof (struct virtio_net_mrgrxhdr));
-			vmrgrx->vrh_bufs = num_bufs;
-			/*
-			 * Make sure iov[0].iov_len >= MIN_BUF_SIZE
-			 * otherwise guest will consider it as invalid frame.
-			 */
-			if (num_bufs == 1 && uelem[0].len < MIN_BUF_SIZE) {
-				uelem[0].len = MIN_BUF_SIZE;
-			}
-			/*
-			 * Release this chain and handle more chains.
-			 */
-			mutex_enter(&hq->hq_u_mutex);
-			vq_pushchain_mrgrx(hq, num_pops, uelem);
-			mutex_exit(&hq->hq_u_mutex);
-		} else {
-			memset(vrx, 0, sizeof (struct virtio_net_hdr));
-			if (total_len < MIN_BUF_SIZE) {
-				total_len = MIN_BUF_SIZE;
-			}
-			/*
-			 * Release this chain and handle more chains.
-			 */
-			mutex_enter(&hq->hq_u_mutex);
-			vq_pushchain(hq, total_len, cookie);
-			mutex_exit(&hq->hq_u_mutex);
-		}
-
-		mp = mp->b_next;
+		mp = next;
 	}
 
-	if ((*hq->hq_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
+	if ((*ring->vr_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
 		if (atomic_cas_uint(&link->l_rx_intr, 0, 1) == 0) {
 			pollwakeup(&link->l_pollhead, POLLIN);
 		}
 	}
 
-	freemsgchain(mp0);
+	/* Free successfully received frames */
+	if (mprx != NULL) {
+		freemsgchain(mprx);
+	}
+
+	/* Free dropped frames, also tallying them */
+	mp = mpdrop;
+	while (mp != NULL) {
+		mblk_t *next = mp->b_next;
+
+		mp->b_next = NULL;
+		freemsg(mp);
+		mp = next;
+		ndrop++;
+	}
+	VIONA_PROBE3(rx, viona_link_t *, link, size_t, nrx, size_t, ndrop);
 }
 
 static void
 viona_desb_free(viona_desb_t *dp)
 {
 	viona_link_t		*link;
-	viona_vring_hqueue_t	*hq;
+	viona_vring_t	*ring;
 	uint_t			ref;
 
 	ref = atomic_dec_uint_nv(&dp->d_ref);
@@ -1208,15 +1307,13 @@ viona_desb_free(viona_desb_t *dp)
 		return;
 
 	link = dp->d_link;
-	hq = &link->l_tx_vring;
+	ring = &link->l_tx_vring;
 
-	mutex_enter(&hq->hq_u_mutex);
-	vq_pushchain(hq, dp->d_len, dp->d_cookie);
-	mutex_exit(&hq->hq_u_mutex);
+	vq_pushchain(ring, dp->d_len, dp->d_cookie);
 
 	kmem_cache_free(viona_desb_cache, dp);
 
-	if ((*hq->hq_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
+	if ((*ring->vr_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
 		if (atomic_cas_uint(&link->l_tx_intr, 0, 1) == 0) {
 			pollwakeup(&link->l_pollhead, POLLOUT);
 		}
@@ -1231,7 +1328,7 @@ viona_desb_free(viona_desb_t *dp)
 }
 
 static void
-viona_tx(viona_link_t *link, viona_vring_hqueue_t *hq)
+viona_tx(viona_link_t *link, viona_vring_t *ring)
 {
 	struct iovec		iov[VTNET_MAXSEGS];
 	uint16_t		cookie;
@@ -1242,9 +1339,7 @@ viona_tx(viona_link_t *link, viona_vring_hqueue_t *hq)
 
 	mp_head = mp_tail = NULL;
 
-	mutex_enter(&hq->hq_a_mutex);
-	n = vq_popchain(link, hq, iov, VTNET_MAXSEGS, &cookie);
-	mutex_exit(&hq->hq_a_mutex);
+	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
 	ASSERT(n != 0);
 
 	dp = kmem_cache_alloc(viona_desb_cache, KM_SLEEP);
