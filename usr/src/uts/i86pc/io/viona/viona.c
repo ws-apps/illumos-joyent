@@ -82,10 +82,14 @@
 #define	VIRTIO_NET_F_MAC	(1 <<  5) /* host supplies MAC */
 #define	VIRTIO_NET_F_MRG_RXBUF	(1 << 15) /* host can merge RX buffers */
 #define	VIRTIO_NET_F_STATUS	(1 << 16) /* config status field available */
+#define	VIRTIO_F_RING_NOTIFY_ON_EMPTY	(1 << 24)
+#define	VIRTIO_F_RING_INDIRECT_DESC	(1 << 28)
+#define	VIRTIO_F_RING_EVENT_IDX		(1 << 29)
 
-#define	VIONA_S_HOSTCAPS		\
-	(VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF | \
-	VIRTIO_NET_F_STATUS)
+#define	VIONA_S_HOSTCAPS					\
+	(VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF |		\
+	VIRTIO_NET_F_STATUS |					\
+	VIRTIO_F_RING_NOTIFY_ON_EMPTY | VIRTIO_F_RING_INDIRECT_DESC)
 
 #define	VIONA_PROBE(name)	DTRACE_PROBE(viona__##name)
 #define	VIONA_PROBE1(name, arg1, arg2)	\
@@ -226,8 +230,7 @@ static int viona_ioc_delete(viona_soft_state_t *ss);
 
 static void *viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len);
 
-static int viona_ioc_ring_init(viona_link_t *, viona_vring_t *,
-    void *, int);
+static int viona_ioc_ring_init(viona_link_t *, viona_vring_t *, void *, int);
 static int viona_ioc_rx_ring_reset(viona_link_t *link);
 static int viona_ioc_tx_ring_reset(viona_link_t *link);
 static void viona_ioc_rx_ring_kick(viona_link_t *link);
@@ -235,9 +238,11 @@ static void viona_ioc_tx_ring_kick(viona_link_t *link);
 static int viona_ioc_rx_intr_clear(viona_link_t *link);
 static int viona_ioc_tx_intr_clear(viona_link_t *link);
 
-static void viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp,
-    boolean_t loopback);
-static void viona_tx(viona_link_t *link, viona_vring_t *ring);
+static void viona_intr_rx(viona_link_t *);
+static void viona_intr_tx(viona_link_t *);
+
+static void viona_rx(void *, mac_resource_handle_t, mblk_t *, boolean_t);
+static void viona_tx(viona_link_t *, viona_vring_t *);
 
 static struct cb_ops viona_cb_ops = {
 	viona_open,
@@ -802,6 +807,10 @@ viona_ioc_tx_ring_kick(viona_link_t *link)
 		}
 		atomic_and_16(ring->vr_used_flags, ~VRING_USED_F_NO_NOTIFY);
 	} while (viona_vr_num_avail(ring));
+
+	if ((link->l_features & VIRTIO_F_RING_NOTIFY_ON_EMPTY) != 0) {
+		viona_intr_tx(link);
+	}
 }
 
 static int
@@ -976,6 +985,22 @@ vq_pushchain_mrgrx(viona_vring_t *ring, int num_bufs, used_elem_t *elem)
 	*ring->vr_used_idx = uidx;
 
 	mutex_exit(&ring->vr_u_mutex);
+}
+
+static void
+viona_intr_rx(viona_link_t *link)
+{
+	if (atomic_cas_uint(&link->l_rx_intr, 0, 1) == 0) {
+		pollwakeup(&link->l_pollhead, POLLIN);
+	}
+}
+
+static void
+viona_intr_tx(viona_link_t *link)
+{
+	if (atomic_cas_uint(&link->l_tx_intr, 0, 1) == 0) {
+		pollwakeup(&link->l_pollhead, POLLOUT);
+	}
 }
 
 static size_t
@@ -1272,9 +1297,7 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 	}
 
 	if ((*ring->vr_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
-		if (atomic_cas_uint(&link->l_rx_intr, 0, 1) == 0) {
-			pollwakeup(&link->l_pollhead, POLLIN);
-		}
+		viona_intr_rx(link);
 	}
 
 	/* Free successfully received frames */
@@ -1314,9 +1337,7 @@ viona_desb_free(viona_desb_t *dp)
 	kmem_cache_free(viona_desb_cache, dp);
 
 	if ((*ring->vr_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
-		if (atomic_cas_uint(&link->l_tx_intr, 0, 1) == 0) {
-			pollwakeup(&link->l_pollhead, POLLOUT);
-		}
+		viona_intr_tx(link);
 	}
 	if (copy_tx_mblks) {
 		mutex_enter(&link->l_tx_mutex);
@@ -1340,7 +1361,10 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 	mp_head = mp_tail = NULL;
 
 	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
-	ASSERT(n != 0);
+	if (n <= 0) {
+		VIONA_PROBE1(bad_tx, viona_vring_t *, ring);
+		return;
+	}
 
 	dp = kmem_cache_alloc(viona_desb_cache, KM_SLEEP);
 	dp->d_frtn.free_func = viona_desb_free;
