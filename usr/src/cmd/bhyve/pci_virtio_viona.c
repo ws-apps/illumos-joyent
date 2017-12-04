@@ -82,18 +82,6 @@
 #define	VIONA_REGSZ	VIONA_R_MAX+1
 
 /*
- * Host capabilities
- */
-#define	VIRTIO_NET_F_MAC	(1 <<  5) /* host supplies MAC */
-#define	VIRTIO_NET_F_MRG_RXBUF	(1 << 15) /* host can merge RX buffers */
-#define	VIRTIO_NET_F_STATUS	(1 << 16) /* config status field available */
-
-#define	VIONA_S_HOSTCAPS		\
-	(VIRTIO_NET_F_MAC |		\
-	VIRTIO_NET_F_MRG_RXBUF |	\
-	VIRTIO_NET_F_STATUS)
-
-/*
  * Queue definitions.
  */
 #define	VIONA_RXQ	0
@@ -105,7 +93,7 @@
 /*
  * Debug printf
  */
-static int pci_viona_debug;
+static volatile int pci_viona_debug;
 #define	DPRINTF(params) if (pci_viona_debug) printf params
 #define	WPRINTF(params) printf params
 
@@ -129,16 +117,6 @@ struct pci_viona_softc {
 
 	uint64_t	vsc_pfn[VIONA_MAXQ];
 	uint16_t	vsc_msix_table_idx[VIONA_MAXQ];
-	/*
-	 * Flag to see if host is already sending data out.
-	 * If it is, no need to wait for lock and send interrupt to host
-	 * for new data.
-	 */
-	boolean_t	vsc_tx_kick_lock_held;
-
-	pthread_t	tx_tid;
-	pthread_mutex_t	tx_mtx;
-	pthread_cond_t	tx_cond;
 };
 #define	viona_ctx(sc)	((sc)->vsc_pi->pi_vmctx)
 
@@ -177,21 +155,13 @@ pci_viona_ring_reset(struct pci_viona_softc *sc, int ring)
 
 	switch (ring) {
 	case VIONA_RXQ:
-		error = ioctl(sc->vsc_vnafd, VNA_IOC_RX_RING_RESET);
-		if (error != 0) {
-			WPRINTF(("ioctl viona rx ring reset failed %d\n",
-			    error));
-		} else {
-			sc->vsc_pfn[VIONA_RXQ] = 0;
-		}
-		break;
 	case VIONA_TXQ:
-		error = ioctl(sc->vsc_vnafd, VNA_IOC_TX_RING_RESET);
+		error = ioctl(sc->vsc_vnafd, VNA_IOC_RING_RESET, ring);
 		if (error != 0) {
-			WPRINTF(("ioctl viona tx ring reset failed %d\n",
-			    error));
+			WPRINTF(("ioctl viona ring %u reset failed %d\n",
+			    ring, error));
 		} else {
-			sc->vsc_pfn[VIONA_TXQ] = 0;
+			sc->vsc_pfn[ring] = 0;
 		}
 		break;
 	case VIONA_CTLQ:
@@ -236,7 +206,8 @@ pci_viona_poll_thread(void *param)
 		if (pollset.revents & POLLIN) {
 			pci_generate_msix(sc->vsc_pi,
 			    sc->vsc_msix_table_idx[VIONA_RXQ]);
-			error = ioctl(sc->vsc_vnafd, VNA_IOC_RX_INTR_CLR);
+			error = ioctl(sc->vsc_vnafd, VNA_IOC_INTR_CLR,
+			    VIONA_RXQ);
 			if (error != 0) {
 				WPRINTF(("ioctl viona rx intr clear failed"
 				    " %d\n", error));
@@ -246,7 +217,8 @@ pci_viona_poll_thread(void *param)
 		if (pollset.revents & POLLOUT) {
 			pci_generate_msix(sc->vsc_pi,
 			    sc->vsc_msix_table_idx[VIONA_TXQ]);
-			error = ioctl(sc->vsc_vnafd, VNA_IOC_TX_INTR_CLR);
+			error = ioctl(sc->vsc_vnafd, VNA_IOC_INTR_CLR,
+			    VIONA_TXQ);
 			if (error != 0) {
 				WPRINTF(("ioctl viona tx intr clear failed"
 				    " %d\n", error));
@@ -258,57 +230,6 @@ pci_viona_poll_thread(void *param)
 }
 
 static void
-pci_viona_ping_rxq(struct pci_viona_softc *sc)
-{
-	int error;
-
-	error = ioctl(sc->vsc_vnafd, VNA_IOC_RX_RING_KICK);
-	if (error != 0) {
-		WPRINTF(("ioctl viona rx ring kick failed %d\n", error));
-	}
-}
-
-static void *
-pci_viona_tx_thread(void *param)
-{
-	struct pci_viona_softc *sc = (struct pci_viona_softc *)param;
-	int error;
-
-	pthread_mutex_lock(&sc->tx_mtx);
-	for (;;) {
-		error = pthread_cond_wait(&sc->tx_cond, &sc->tx_mtx);
-		assert(error == 0);
-		sc->vsc_tx_kick_lock_held = B_TRUE;
-		error = ioctl(sc->vsc_vnafd, VNA_IOC_TX_RING_KICK);
-		if (error != 0) {
-			WPRINTF(("ioctl viona tx ring kick failed %d\n",
-			    error));
-		}
-		sc->vsc_tx_kick_lock_held = B_FALSE;
-	}
-	pthread_mutex_unlock(&sc->tx_mtx);
-
-	return (NULL);
-}
-
-static void
-pci_viona_ping_txq(struct pci_viona_softc *sc)
-{
-	/* Signal the tx thread for processing */
-	if (sc->vsc_tx_kick_lock_held)
-		return;
-	pthread_mutex_lock(&sc->tx_mtx);
-	pthread_cond_signal(&sc->tx_cond);
-	pthread_mutex_unlock(&sc->tx_mtx);
-}
-
-static void
-pci_viona_ping_ctlq(struct pci_viona_softc *sc)
-{
-	DPRINTF(("viona: control qnotify!\n\r"));
-}
-
-static void
 pci_viona_ring_init(struct pci_viona_softc *sc, uint64_t pfn)
 {
 	int			qnum = sc->vsc_curq;
@@ -317,29 +238,19 @@ pci_viona_ring_init(struct pci_viona_softc *sc, uint64_t pfn)
 
 	assert(qnum < VIONA_MAXQ);
 
+	if (qnum == VIONA_CTLQ) {
+		return;
+	}
+
 	sc->vsc_pfn[qnum] = (pfn << VRING_PFN);
 
+	vna_ri.ri_index = qnum;
 	vna_ri.ri_qsize = pci_viona_qsize(qnum);
 	vna_ri.ri_qaddr = (pfn << VRING_PFN);
+	error = ioctl(sc->vsc_vnafd, VNA_IOC_RING_INIT, &vna_ri);
 
-	switch (qnum) {
-	case VIONA_RXQ:
-		error = ioctl(sc->vsc_vnafd, VNA_IOC_RX_RING_INIT, &vna_ri);
-		if (error != 0) {
-			WPRINTF(("ioctl viona rx ring init failed %d\n",
-			    error));
-		}
-		break;
-	case VIONA_TXQ:
-		error = ioctl(sc->vsc_vnafd, VNA_IOC_TX_RING_INIT, &vna_ri);
-		if (error != 0) {
-			WPRINTF(("ioctl viona tx ring init failed %d\n",
-			    error));
-		}
-		break;
-	case VIONA_CTLQ:
-	default:
-		break;
+	if (error != 0) {
+		WPRINTF(("ioctl viona ring %u init failed %d\n", qnum, error));
 	}
 }
 
@@ -417,7 +328,6 @@ pci_viona_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 		return (1);
 	}
 
-	sc->vsc_tx_kick_lock_held = B_FALSE;
 	memcpy(sc->vsc_macaddr, attr.va_mac_addr, ETHERADDRL);
 
 	dladm_close(handle);
@@ -452,26 +362,8 @@ pci_viona_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
 	pci_emul_alloc_bar(pi, 0, PCIBAR_IO, VIONA_REGSZ);
 
-	/*
-	 * Initialize tx semaphore & spawn TX processing thread
-	 * As of now, only one thread for TX desc processing is
-	 * spawned.
-	 */
-	pthread_mutex_init(&sc->tx_mtx, NULL);
-	pthread_cond_init(&sc->tx_cond, NULL);
-	pthread_create(&sc->tx_tid, NULL, pci_viona_tx_thread, (void *)sc);
-
 	return (0);
 }
-
-/*
- * Function pointer array to handle queue notifications
- */
-static void (*pci_viona_qnotify[VIONA_MAXQ])(struct pci_viona_softc *) = {
-	pci_viona_ping_rxq,
-	pci_viona_ping_txq,
-	pci_viona_ping_ctlq
-};
 
 static uint64_t
 viona_adjust_offset(struct pci_devinst *pi, uint64_t offset)
@@ -487,6 +379,53 @@ viona_adjust_offset(struct pci_devinst *pi, uint64_t offset)
 
 	return (offset);
 }
+
+static void
+pci_viona_barupdate(struct pci_devinst *pi, int idx, int reg)
+{
+	struct pci_viona_softc *sc = pi->pi_arg;
+	uint_t ioport;
+	int err;
+
+	/* Only care about updates to the virtio cfg area */
+	if (idx != 0) {
+		return;
+	}
+
+	assert(pi->pi_bar[idx].type == PCIBAR_IO);
+	if (reg == 0) {
+		ioport = 0;
+	} else {
+		ioport = pi->pi_bar[idx].addr;
+		ioport += viona_adjust_offset(pi, VTCFG_R_QNOTIFY);
+	}
+	err = ioctl(sc->vsc_vnafd, VNA_IOC_SET_NOTIFY_IOP, ioport);
+	if (err != 0) {
+		DPRINTF(("viona: failed setting notify ioport (%x)\n", ioport));
+	}
+}
+
+static void
+pci_viona_qnotify(struct pci_viona_softc *sc, int ring)
+{
+	int error;
+
+	switch (ring) {
+	case VIONA_TXQ:
+	case VIONA_RXQ:
+		error = ioctl(sc->vsc_vnafd, VNA_IOC_RING_KICK, ring);
+		if (error != 0) {
+			WPRINTF(("ioctl viona ring %d kick failed %d\n",
+			    ring, error));
+		}
+		break;
+	case VIONA_CTLQ:
+		DPRINTF(("viona: control qnotify!\n"));
+		break;
+	default:
+		break;
+	}
+};
 
 static void
 pci_viona_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
@@ -534,7 +473,7 @@ pci_viona_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	case VTCFG_R_QNOTIFY:
 		assert(size == 2);
 		assert(value < VIONA_MAXQ);
-		(*pci_viona_qnotify[value])(sc);
+		pci_viona_qnotify(sc, value);
 		break;
 	case VTCFG_R_STATUS:
 		assert(size == 1);
@@ -585,7 +524,7 @@ pci_viona_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	pthread_mutex_unlock(&sc->vsc_mtx);
 }
 
-uint64_t
+static uint64_t
 pci_viona_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
     int baridx, uint64_t offset, int size)
 {
@@ -696,6 +635,7 @@ struct pci_devemu pci_de_viona = {
 	.pe_emu = 	"virtio-net-viona",
 	.pe_init =	pci_viona_init,
 	.pe_barwrite =	pci_viona_write,
-	.pe_barread =	pci_viona_read
+	.pe_barread =	pci_viona_read,
+	.pe_barupdate =	pci_viona_barupdate
 };
 PCI_EMUL_SET(pci_de_viona);

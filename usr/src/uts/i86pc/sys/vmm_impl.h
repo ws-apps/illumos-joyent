@@ -48,7 +48,8 @@ typedef struct vmm_devmem_entry vmm_devmem_entry_t;
 enum vmm_softc_state {
 	VMM_HELD	= 1,	/* external driver(s) possess hold on VM */
 	VMM_CLEANUP	= 2,	/* request that holds are released */
-	VMM_PURGED	= 4	/* all hold have been released */
+	VMM_PURGED	= 4,	/* all hold have been released */
+	VMM_BLOCK_HOOK	= 8	/* mem hook install temporarily blocked */
 };
 
 struct vmm_softc {

@@ -37,6 +37,7 @@
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/ddi.h>
+#include <sys/disp.h>
 #include <sys/sunddi.h>
 #include <sys/sunndi.h>
 #include <sys/sysmacros.h>
@@ -137,18 +138,51 @@ struct virtio_net_hdr {
 };
 #pragma pack()
 
+enum viona_vq_id {
+	VIONA_VQ_RX = 0,
+	VIONA_VQ_TX = 1,
+	VIONA_VQ_MAX = 2
+};
+
 struct viona_link;
 typedef struct viona_link viona_link_t;
+struct viona_desb;
+typedef struct viona_desb viona_desb_t;
+
+enum viona_ring_state {
+	VRS_RESET	= 0x00,	/* just allocated or reset */
+	VRS_INIT	= 0x01,	/* init-ed with addrs and worker thread */
+	VRS_RUN		= 0x02,	/* running work routine */
+
+	/* Additional flag(s): */
+	VRS_SETUP	= 0x04,
+	VRS_REQ_START	= 0x08,
+	VRS_REQ_STOP	= 0x10,
+};
+
+#define	VRS_STATE_MASK (VRS_RESET|VRS_INIT|VRS_RUN)
+
+#define	VRING_NEED_BAIL(ring, proc)				\
+		(((ring)->vr_state & VRS_REQ_STOP) != 0 ||	\
+		((proc)->p_flag & SEXITING) != 0)
 
 typedef struct viona_vring {
-	/* Internal state */
-	kmutex_t		vr_a_mutex;
-	kmutex_t		vr_u_mutex;
-	viona_link_t		*vr_link;
+	viona_link_t	*vr_link;
 
-	uint16_t		vr_size;
-	uint16_t		vr_mask;	/* cached from vr_size */
-	uint16_t		vr_cur_aidx;	/* trails behind 'avail_idx' */
+	kmutex_t	vr_lock;
+	kcondvar_t	vr_cv;
+	uint_t		vr_state;
+	uint_t		vr_intr_enabled;
+	uint_t		vr_xfer_outstanding;
+	kthread_t	*vr_worker_thread;
+	viona_desb_t	*vr_desb;
+
+	/* Internal ring-related state */
+	kmutex_t	vr_a_mutex;	/* sync consumers of 'avail' */
+	kmutex_t	vr_u_mutex;	/* sync consumers of 'used' */
+	uint16_t	vr_size;
+	uint16_t	vr_mask;	/* cached from vr_size */
+	uint16_t	vr_cur_aidx;	/* trails behind 'avail_idx' */
 
 	/* Host-context pointers to the queue */
 	volatile struct virtio_desc	*vr_descr;
@@ -165,35 +199,31 @@ typedef struct viona_vring {
 } viona_vring_t;
 
 struct viona_link {
-	datalink_id_t		l_linkid;
-
 	vmm_hold_t		*l_vm_hold;
+	boolean_t		l_destroyed;
 
+	viona_vring_t		l_vrings[VIONA_VQ_MAX];
+	uint32_t		l_features;
+	uintptr_t		l_notify_ioport;
+	void			*l_notify_cookie;
+
+	datalink_id_t		l_linkid;
 	mac_handle_t		l_mh;
 	mac_client_handle_t	l_mch;
 
 	pollhead_t		l_pollhead;
-
-	viona_vring_t		l_rx_vring;
-	uint_t			l_rx_intr;
-
-	viona_vring_t		l_tx_vring;
-	kcondvar_t		l_tx_cv;
-	uint_t			l_tx_intr;
-	kmutex_t		l_tx_mutex;
-	int			l_tx_outstanding;
-	uint32_t		l_features;
 };
 
-typedef struct {
+struct viona_desb {
 	frtn_t			d_frtn;
-	viona_link_t		*d_link;
+	viona_vring_t		*d_ring;
 	uint_t			d_ref;
+	uint32_t		d_len;
 	uint16_t		d_cookie;
-	int			d_len;
-} viona_desb_t;
+};
 
 typedef struct viona_soft_state {
+	kmutex_t		ss_lock;
 	viona_link_t		*ss_link;
 } viona_soft_state_t;
 
@@ -202,16 +232,15 @@ typedef struct used_elem {
 	uint32_t	len;
 } used_elem_t;
 
-
 static void			*viona_state;
 static dev_info_t		*viona_dip;
 static id_space_t		*viona_minors;
-static kmem_cache_t		*viona_desb_cache;
+
 /*
  * copy tx mbufs from virtio ring to avoid necessitating a wait for packet
  * transmission to free resources.
  */
-static boolean_t		copy_tx_mblks = B_TRUE;
+static boolean_t		viona_force_copy_tx_mblks = B_FALSE;
 
 extern struct vm *vm_lookup_by_name(char *name);
 extern uint64_t vm_gpa2hpa(struct vm *vm, uint64_t gpa, size_t len);
@@ -230,17 +259,20 @@ static int viona_ioc_delete(viona_soft_state_t *ss);
 
 static void *viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len);
 
-static int viona_ioc_ring_init(viona_link_t *, viona_vring_t *, void *, int);
-static int viona_ioc_rx_ring_reset(viona_link_t *link);
-static int viona_ioc_tx_ring_reset(viona_link_t *link);
-static void viona_ioc_rx_ring_kick(viona_link_t *link);
-static void viona_ioc_tx_ring_kick(viona_link_t *link);
-static int viona_ioc_rx_intr_clear(viona_link_t *link);
-static int viona_ioc_tx_intr_clear(viona_link_t *link);
+static void viona_ring_alloc(viona_link_t *, viona_vring_t *);
+static void viona_ring_free(viona_vring_t *);
+static kthread_t *viona_create_worker(viona_vring_t *);
+
+static int viona_ioc_set_notify_ioport(viona_link_t *, uint_t);
+static int viona_ioc_ring_init(viona_link_t *, void *, int);
+static int viona_ioc_ring_reset(viona_link_t *, uint_t);
+static int viona_ioc_ring_kick(viona_link_t *, uint_t);
+static int viona_ioc_ring_intr_clear(viona_link_t *link, uint_t);
 
 static void viona_intr_rx(viona_link_t *);
 static void viona_intr_tx(viona_link_t *);
 
+static void viona_desb_release(viona_desb_t *);
 static void viona_rx(void *, mac_resource_handle_t, mblk_t *, boolean_t);
 static void viona_tx(viona_link_t *, viona_vring_t *);
 
@@ -335,10 +367,12 @@ set_viona_tx_mode()
 	if ((bcm_nic_major = ddi_name_to_major(BCM_NIC_DRIVER))
 	    != DDI_MAJOR_T_NONE) {
 		if (ddi_hold_installed_driver(bcm_nic_major) != NULL) {
-			copy_tx_mblks = B_FALSE;
+			viona_force_copy_tx_mblks = B_TRUE;
 			ddi_rele_driver(bcm_nic_major);
+			return;
 		}
 	}
+	viona_force_copy_tx_mblks = B_FALSE;
 }
 
 static int
@@ -356,9 +390,6 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	viona_desb_cache = kmem_cache_create("viona_desb_cache",
-	    sizeof (viona_desb_t), 0, NULL, NULL, NULL, NULL, NULL, 0);
-
 	viona_dip = dip;
 
 	set_viona_tx_mode();
@@ -374,8 +405,6 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	kmem_cache_destroy(viona_desb_cache);
-
 	id_space_destroy(viona_minors);
 
 	ddi_remove_minor_node(viona_dip, NULL);
@@ -389,6 +418,7 @@ static int
 viona_open(dev_t *devp, int flag, int otype, cred_t *credp)
 {
 	int	minor;
+	viona_soft_state_t *ss;
 
 	if (otype != OTYP_CHR) {
 		return (EINVAL);
@@ -410,6 +440,8 @@ viona_open(dev_t *devp, int flag, int otype, cred_t *credp)
 		return (ENOMEM);
 	}
 
+	ss = ddi_get_soft_state(viona_state, minor);
+	mutex_init(&ss->ss_lock, NULL, MUTEX_DEFAULT, NULL);
 	*devp = makedevice(getmajor(*devp), minor);
 
 	return (0);
@@ -461,13 +493,23 @@ viona_ioctl(dev_t dev, int cmd, intptr_t data, int md, cred_t *cr, int *rv)
 		return (viona_ioc_create(ss, dptr, md, cr));
 	case VNA_IOC_DELETE:
 		return (viona_ioc_delete(ss));
+	case VNA_IOC_GET_FEATURES:
+		val = VIONA_S_HOSTCAPS;
+		if (ddi_copyout(&val, dptr, sizeof (val), md) != 0) {
+			return (EFAULT);
+		}
+		return (0);
 	default:
 		break;
 	}
 
-	if ((link = ss->ss_link) == NULL || vmm_drv_expired(link->l_vm_hold)) {
+	mutex_enter(&ss->ss_lock);
+	if ((link = ss->ss_link) == NULL || link->l_destroyed ||
+	    vmm_drv_expired(link->l_vm_hold)) {
+		mutex_exit(&ss->ss_lock);
 		return (ENXIO);
 	}
+
 	switch (cmd) {
 	case VNA_IOC_SET_FEATURES:
 		if (ddi_copyin(dptr, &val, sizeof (val), md) != 0) {
@@ -475,41 +517,27 @@ viona_ioctl(dev_t dev, int cmd, intptr_t data, int md, cred_t *cr, int *rv)
 		}
 		link->l_features = val & VIONA_S_HOSTCAPS;
 		break;
-	case VNA_IOC_GET_FEATURES:
-		val = VIONA_S_HOSTCAPS;
-		if (ddi_copyout(&val, dptr, sizeof (val), md) != 0) {
-			return (EFAULT);
-		}
+	case VNA_IOC_RING_INIT:
+		err = viona_ioc_ring_init(link, dptr, md);
 		break;
-	case VNA_IOC_RX_RING_INIT:
-		err = viona_ioc_ring_init(link, &link->l_rx_vring, dptr, md);
+	case VNA_IOC_RING_RESET:
+		err = viona_ioc_ring_reset(link, (uint_t)data);
 		break;
-	case VNA_IOC_TX_RING_INIT:
-		err = viona_ioc_ring_init(link, &link->l_tx_vring, dptr, md);
+	case VNA_IOC_RING_KICK:
+		err = viona_ioc_ring_kick(link, (uint_t)data);
 		break;
-	case VNA_IOC_RX_RING_RESET:
-		err = viona_ioc_rx_ring_reset(link);
+	case VNA_IOC_INTR_CLR:
+		err = viona_ioc_ring_intr_clear(link, (uint_t)data);
 		break;
-	case VNA_IOC_TX_RING_RESET:
-		err = viona_ioc_tx_ring_reset(link);
-		break;
-	case VNA_IOC_RX_RING_KICK:
-		viona_ioc_rx_ring_kick(link);
-		break;
-	case VNA_IOC_TX_RING_KICK:
-		viona_ioc_tx_ring_kick(link);
-		break;
-	case VNA_IOC_RX_INTR_CLR:
-		err = viona_ioc_rx_intr_clear(link);
-		break;
-	case VNA_IOC_TX_INTR_CLR:
-		err = viona_ioc_tx_intr_clear(link);
+	case VNA_IOC_SET_NOTIFY_IOP:
+		err = viona_ioc_set_notify_ioport(link, (uint_t)data);
 		break;
 	default:
 		err = ENOTTY;
 		break;
 	}
 
+	mutex_exit(&ss->ss_lock);
 	return (err);
 }
 
@@ -517,26 +545,33 @@ static int
 viona_chpoll(dev_t dev, short events, int anyyet, short *reventsp,
     struct pollhead **phpp)
 {
-	viona_soft_state_t	*ss;
+	viona_soft_state_t *ss;
+	viona_link_t *link;
 
 	ss = ddi_get_soft_state(viona_state, getminor(dev));
-	if (ss == NULL || ss->ss_link == NULL) {
+	if (ss == NULL) {
+		return (ENXIO);
+	}
+
+	mutex_enter(&ss->ss_lock);
+	if ((link = ss->ss_link) == NULL || link->l_destroyed) {
+		mutex_exit(&ss->ss_lock);
 		return (ENXIO);
 	}
 
 	*reventsp = 0;
-
-	if (ss->ss_link->l_rx_intr && (events & POLLIN)) {
+	if (link->l_vrings[VIONA_VQ_RX].vr_intr_enabled != 0 &&
+	    (events & POLLIN) != 0) {
 		*reventsp |= POLLIN;
 	}
-
-	if (ss->ss_link->l_tx_intr && (events & POLLOUT)) {
+	if (link->l_vrings[VIONA_VQ_TX].vr_intr_enabled != 0 &&
+	    (events & POLLOUT) != 0) {
 		*reventsp |= POLLOUT;
 	}
-
-	if (*reventsp == 0 && !anyyet) {
-		*phpp = &ss->ss_link->l_pollhead;
+	if ((*reventsp == 0 && !anyyet) || (events & POLLET)) {
+		*phpp = &link->l_pollhead;
 	}
+	mutex_exit(&ss->ss_lock);
 
 	return (0);
 }
@@ -545,26 +580,32 @@ static int
 viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 {
 	vioc_create_t	kvc;
-	viona_link_t	*link;
+	viona_link_t	*link = NULL;
 	char		cli_name[MAXNAMELEN];
-	int		err;
+	int		err = 0;
 	file_t		*fp;
 	vmm_hold_t	*hold = NULL;
 
-	if (ss->ss_link != NULL) {
-		return (EEXIST);
-	}
+	ASSERT(MUTEX_NOT_HELD(&ss->ss_lock));
+
 	if (ddi_copyin(dptr, &kvc, sizeof (kvc), md) != 0) {
 		return (EFAULT);
 	}
 
+	mutex_enter(&ss->ss_lock);
+	if (ss->ss_link != NULL) {
+		mutex_exit(&ss->ss_lock);
+		return (EEXIST);
+	}
+
 	if ((fp = getf(kvc.c_vmfd)) == NULL) {
-		return (EBADF);
+		err = EBADF;
+		goto bail;
 	}
 	err = vmm_drv_hold(fp, cr, &hold);
 	releasef(kvc.c_vmfd);
-	if (err != NULL) {
-		return (err);
+	if (err != 0) {
+		goto bail;
 	}
 
 	link = kmem_zalloc(sizeof (viona_link_t), KM_SLEEP);
@@ -584,54 +625,60 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 	}
 
 	link->l_features = VIONA_S_HOSTCAPS;
-
-	link->l_rx_vring.vr_link = link;
-	link->l_tx_vring.vr_link = link;
-	mutex_init(&link->l_rx_vring.vr_a_mutex, NULL, MUTEX_DRIVER, NULL);
-	mutex_init(&link->l_rx_vring.vr_u_mutex, NULL, MUTEX_DRIVER, NULL);
-	mutex_init(&link->l_rx_vring.vr_a_mutex, NULL, MUTEX_DRIVER, NULL);
-	mutex_init(&link->l_tx_vring.vr_u_mutex, NULL, MUTEX_DRIVER, NULL);
-	if (copy_tx_mblks) {
-		mutex_init(&link->l_tx_mutex, NULL, MUTEX_DRIVER, NULL);
-		cv_init(&link->l_tx_cv, NULL, CV_DRIVER, NULL);
-	}
+	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_RX]);
+	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_TX]);
 	ss->ss_link = link;
 
+	mutex_exit(&ss->ss_lock);
 	return (0);
 
 bail:
-	if (link->l_mch != NULL) {
-		mac_client_close(link->l_mch, 0);
-	}
-	if (link->l_mh != NULL) {
-		mac_close(link->l_mh);
+	if (link != NULL) {
+		if (link->l_mch != NULL) {
+			mac_client_close(link->l_mch, 0);
+		}
+		if (link->l_mh != NULL) {
+			mac_close(link->l_mh);
+		}
+		kmem_free(link, sizeof (viona_link_t));
 	}
 	if (hold != NULL) {
 		vmm_drv_rele(hold);
 	}
-	kmem_free(link, sizeof (viona_link_t));
 
+	mutex_exit(&ss->ss_lock);
 	return (err);
 }
 
 static int
 viona_ioc_delete(viona_soft_state_t *ss)
 {
-	viona_link_t	*link;
+	viona_link_t *link;
 
-	link = ss->ss_link;
-	if (link == NULL) {
-		return (ENOSYS);
+	mutex_enter(&ss->ss_lock);
+	if ((link = ss->ss_link) == NULL) {
+		mutex_exit(&ss->ss_lock);
+		return (0);
 	}
-	if (copy_tx_mblks) {
-		mutex_enter(&link->l_tx_mutex);
-		while (link->l_tx_outstanding != 0) {
-			cv_wait(&link->l_tx_cv, &link->l_tx_mutex);
-		}
-		mutex_exit(&link->l_tx_mutex);
+
+	if (link->l_destroyed) {
+		/* Another thread made it here first. */
+		mutex_exit(&ss->ss_lock);
+		return (EAGAIN);
 	}
+	link->l_destroyed = B_TRUE;
+	mutex_exit(&ss->ss_lock);
+
+	VERIFY0(viona_ioc_ring_reset(link, VIONA_VQ_RX));
+	VERIFY0(viona_ioc_ring_reset(link, VIONA_VQ_TX));
+
+	mutex_enter(&ss->ss_lock);
+	VERIFY0(viona_ioc_set_notify_ioport(link, 0));
 	if (link->l_mch != NULL) {
-		mac_rx_clear(link->l_mch);
+		/*
+		 * The RX ring will have cleared its receive function from the
+		 * mac client handle, so all that is left to do is close it.
+		 */
 		mac_client_close(link->l_mch, 0);
 	}
 	if (link->l_mh != NULL) {
@@ -642,19 +689,13 @@ viona_ioc_delete(viona_soft_state_t *ss)
 		link->l_vm_hold = NULL;
 	}
 
-	mutex_destroy(&link->l_tx_vring.vr_a_mutex);
-	mutex_destroy(&link->l_tx_vring.vr_u_mutex);
-	mutex_destroy(&link->l_rx_vring.vr_a_mutex);
-	mutex_destroy(&link->l_rx_vring.vr_u_mutex);
-	if (copy_tx_mblks) {
-		mutex_destroy(&link->l_tx_mutex);
-		cv_destroy(&link->l_tx_cv);
-	}
+	viona_ring_free(&link->l_vrings[VIONA_VQ_RX]);
+	viona_ring_free(&link->l_vrings[VIONA_VQ_TX]);
+	pollhead_clean(&link->l_pollhead);
+	ss->ss_link = NULL;
+	mutex_exit(&ss->ss_lock);
 
 	kmem_free(link, sizeof (viona_link_t));
-
-	ss->ss_link = NULL;
-
 	return (0);
 }
 
@@ -667,21 +708,54 @@ viona_gpa2kva(viona_link_t *link, uint64_t gpa, size_t len)
 	return (vmm_drv_gpa2kva(link->l_vm_hold, gpa, len));
 }
 
-static int
-viona_ioc_ring_init(viona_link_t *link, viona_vring_t *ring, void *u_ri, int md)
+static void
+viona_ring_alloc(viona_link_t *link, viona_vring_t *ring)
 {
-	vioc_ring_init_t	kri;
-	uintptr_t		pos;
-	size_t			desc_sz, avail_sz, used_sz;
-	uint16_t		cnt;
+	ring->vr_link = link;
+	mutex_init(&ring->vr_lock, NULL, MUTEX_DRIVER, NULL);
+	cv_init(&ring->vr_cv, NULL, CV_DRIVER, NULL);
+	mutex_init(&ring->vr_a_mutex, NULL, MUTEX_DRIVER, NULL);
+	mutex_init(&ring->vr_u_mutex, NULL, MUTEX_DRIVER, NULL);
+}
 
-	if (ddi_copyin(u_ri, &kri, sizeof (kri), md) != 0) {
+static void
+viona_ring_free(viona_vring_t *ring)
+{
+	mutex_destroy(&ring->vr_lock);
+	cv_destroy(&ring->vr_cv);
+	mutex_destroy(&ring->vr_a_mutex);
+	mutex_destroy(&ring->vr_u_mutex);
+	ring->vr_link = NULL;
+}
+
+static int
+viona_ioc_ring_init(viona_link_t *link, void *udata, int md)
+{
+	vioc_ring_init_t kri;
+	viona_vring_t *ring;
+	kthread_t *t;
+	uintptr_t pos;
+	size_t desc_sz, avail_sz, used_sz;
+	uint16_t cnt;
+	int err = 0;
+
+	if (ddi_copyin(udata, &kri, sizeof (kri), md) != 0) {
 		return (EFAULT);
 	}
 
+	if (kri.ri_index >= VIONA_VQ_MAX) {
+		return (EINVAL);
+	}
 	cnt = kri.ri_qsize;
 	if (cnt == 0 || cnt > VRING_MAX_LEN || (1 << (ffs(cnt) - 1)) != cnt) {
 		return (EINVAL);
+	}
+
+	ring = &link->l_vrings[kri.ri_index];
+	mutex_enter(&ring->vr_lock);
+	if (ring->vr_state != VRS_RESET) {
+		mutex_exit(&ring->vr_lock);
+		return (EBUSY);
 	}
 
 	pos = kri.ri_qaddr;
@@ -693,13 +767,15 @@ viona_ioc_ring_init(viona_link_t *link, viona_vring_t *ring, void *u_ri, int md)
 	ring->vr_mask = (ring->vr_size - 1);
 	ring->vr_descr = viona_gpa2kva(link, pos, desc_sz);
 	if (ring->vr_descr == NULL) {
-		return (EINVAL);
+		err = EINVAL;
+		goto fail;
 	}
 	pos += desc_sz;
 
 	ring->vr_avail_flags = viona_gpa2kva(link, pos, avail_sz);
 	if (ring->vr_avail_flags == NULL) {
-		return (EINVAL);
+		err = EINVAL;
+		goto fail;
 	}
 	ring->vr_avail_idx = ring->vr_avail_flags + 1;
 	ring->vr_avail_ring = ring->vr_avail_flags + 2;
@@ -709,7 +785,8 @@ viona_ioc_ring_init(viona_link_t *link, viona_vring_t *ring, void *u_ri, int md)
 	pos = P2ROUNDUP(pos, VRING_ALIGN);
 	ring->vr_used_flags = viona_gpa2kva(link, pos, used_sz);
 	if (ring->vr_used_flags == NULL) {
-		return (EINVAL);
+		err = EINVAL;
+		goto fail;
 	}
 	ring->vr_used_idx = ring->vr_used_flags + 1;
 	ring->vr_used_ring = (struct virtio_used *)(ring->vr_used_flags + 2);
@@ -718,55 +795,145 @@ viona_ioc_ring_init(viona_link_t *link, viona_vring_t *ring, void *u_ri, int md)
 	/* Initialize queue indexes */
 	ring->vr_cur_aidx = 0;
 
+	/* Allocate desb handles for TX ring if packet copying not disabled */
+	if (kri.ri_index == VIONA_VQ_TX && !viona_force_copy_tx_mblks) {
+		viona_desb_t *desb, *dp;
+
+		desb = kmem_zalloc(sizeof (viona_desb_t) * cnt, KM_SLEEP);
+		dp = desb;
+		for (uint_t i = 0; i < cnt; i++, dp++) {
+			dp->d_frtn.free_func = viona_desb_release;
+			dp->d_frtn.free_arg = (void *)dp;
+			dp->d_ring = ring;
+		}
+		ring->vr_desb = desb;
+	}
+
+	t = viona_create_worker(ring);
+	if (t == NULL) {
+		err = ENOMEM;
+		goto fail;
+	}
+	ring->vr_worker_thread = t;
+	ring->vr_state = VRS_RESET|VRS_SETUP;
+	cv_broadcast(&ring->vr_cv);
+	mutex_exit(&ring->vr_lock);
+	return (0);
+
+fail:
+	if (ring->vr_desb != NULL) {
+		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * cnt);
+	}
+	ring->vr_size = 0;
+	ring->vr_mask = 0;
+	ring->vr_descr = NULL;
+	ring->vr_avail_flags = NULL;
+	ring->vr_avail_idx = NULL;
+	ring->vr_avail_ring = NULL;
+	ring->vr_avail_used_event = NULL;
+	ring->vr_used_flags = NULL;
+	ring->vr_used_idx = NULL;
+	ring->vr_used_ring = NULL;
+	ring->vr_used_avail_event = NULL;
+	ring->vr_state = VRS_RESET;
+	mutex_exit(&ring->vr_lock);
+	return (err);
+}
+
+static int
+viona_ioc_ring_reset(viona_link_t *link, uint_t idx)
+{
+	viona_vring_t *ring;
+
+	if (idx >= VIONA_VQ_MAX) {
+		return (EINVAL);
+	}
+	ring = &link->l_vrings[idx];
+
+	mutex_enter(&ring->vr_lock);
+	if (ring->vr_state != VRS_RESET) {
+		ring->vr_state |= VRS_REQ_STOP;
+		cv_broadcast(&ring->vr_cv);
+		while (ring->vr_state != VRS_RESET) {
+			cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
+		}
+	}
+	if (ring->vr_desb != NULL) {
+		VERIFY(ring->vr_xfer_outstanding == 0);
+		kmem_free(ring->vr_desb, sizeof (viona_desb_t) * ring->vr_size);
+		ring->vr_desb = NULL;
+	}
+	mutex_exit(&ring->vr_lock);
+
 	return (0);
 }
 
 static int
-viona_ioc_ring_reset_common(viona_vring_t *ring)
+viona_ioc_ring_kick(viona_link_t *link, uint_t idx)
 {
-	/*
-	 * Reset all soft state
-	 */
-	ring->vr_cur_aidx = 0;
+	viona_vring_t *ring;
+	uint_t state;
+	int err;
 
-	return (0);
+	if (idx >= VIONA_VQ_MAX) {
+		return (EINVAL);
+	}
+	ring = &link->l_vrings[idx];
+
+	mutex_enter(&ring->vr_lock);
+	state = ring->vr_state & VRS_STATE_MASK;
+	switch (state) {
+	case VRS_INIT:
+		ring->vr_state |= VRS_REQ_START;
+		/* FALLTHROUGH */
+	case VRS_RUN:
+		cv_broadcast(&ring->vr_cv);
+		err = 0;
+		break;
+	default:
+		err = EBUSY;
+		break;
+	}
+	mutex_exit(&ring->vr_lock);
+
+	return (err);
 }
 
 static int
-viona_ioc_rx_ring_reset(viona_link_t *link)
+viona_notify_wcb(void *arg, uintptr_t ioport, uint_t sz, uint64_t val)
 {
-	viona_vring_t	*ring;
+	viona_link_t *link = (viona_link_t *)arg;
+	uint16_t vq = (uint16_t)val;
 
-	mac_rx_clear(link->l_mch);
-
-	ring = &link->l_rx_vring;
-
-	return (viona_ioc_ring_reset_common(ring));
+	if (ioport != link->l_notify_ioport || sz != sizeof (uint16_t)) {
+		return (EINVAL);
+	}
+	return (viona_ioc_ring_kick(link, vq));
 }
 
 static int
-viona_ioc_tx_ring_reset(viona_link_t *link)
+viona_ioc_set_notify_ioport(viona_link_t *link, uint_t ioport)
 {
-	viona_vring_t	*ring;
+	int err = 0;
 
-	ring = &link->l_tx_vring;
+	if (link->l_notify_ioport != 0) {
+		vmm_drv_ioport_unhook(link->l_vm_hold, &link->l_notify_cookie);
+		link->l_notify_ioport = 0;
+	}
 
-	return (viona_ioc_ring_reset_common(ring));
-}
-
-static void
-viona_ioc_rx_ring_kick(viona_link_t *link)
-{
-	viona_vring_t	*ring = &link->l_rx_vring;
-
-	atomic_or_16(ring->vr_used_flags, VRING_USED_F_NO_NOTIFY);
-
-	mac_rx_set(link->l_mch, viona_rx, link);
+	if (ioport != 0) {
+		err = vmm_drv_ioport_hook(link->l_vm_hold, ioport, NULL,
+		    viona_notify_wcb, (void *)link, &link->l_notify_cookie);
+		if (err == 0) {
+			link->l_notify_ioport = ioport;
+		}
+	}
+	return (err);
 }
 
 /*
- * Return the number of available descriptors in the vring taking care
- * of the 16-bit index wraparound.
+ * Return the number of available descriptors in the vring taking care of the
+ * 16-bit index wraparound.
  */
 static inline int
 viona_vr_num_avail(viona_vring_t *ring)
@@ -776,10 +943,9 @@ viona_vr_num_avail(viona_vring_t *ring)
 	/*
 	 * We're just computing (a-b) in GF(216).
 	 *
-	 * The only glitch here is that in standard C,
-	 * uint16_t promotes to (signed) int when int has
-	 * more than 16 bits (pretty much always now), so
-	 * we have to force it back to unsigned.
+	 * The only glitch here is that in standard C, uint16_t promotes to
+	 * (signed) int when int has more than 16 bits (almost always now).
+	 * A cast back to unsigned is necessary for proper operation.
 	 */
 	ndesc = (unsigned)*ring->vr_avail_idx - (unsigned)ring->vr_cur_aidx;
 
@@ -789,43 +955,167 @@ viona_vr_num_avail(viona_vring_t *ring)
 }
 
 static void
-viona_ioc_tx_ring_kick(viona_link_t *link)
+viona_worker_rx(viona_vring_t *ring, viona_link_t *link)
 {
-	viona_vring_t	*ring = &link->l_tx_vring;
+	proc_t *p = ttoproc(curthread);
+
+	ASSERT(MUTEX_HELD(&ring->vr_lock));
+	ASSERT(ring->vr_state == (VRS_INIT|VRS_REQ_START));
+
+	atomic_or_16(ring->vr_used_flags, VRING_USED_F_NO_NOTIFY);
+	mac_rx_set(link->l_mch, viona_rx, link);
+	ring->vr_state = VRS_RUN;
 
 	do {
+		/*
+		 * For now, there is little to do in the RX worker as inbound
+		 * data is delivered by MAC via the viona_rx callback.
+		 * If tap-like functionality is added later, this would be a
+		 * convenient place to inject frames into the guest.
+		 */
+		(void) cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
+		if ((p->p_flag & SEXITING) != 0) {
+			break;
+		}
+	} while ((ring->vr_state & VRS_REQ_STOP) == 0);
+
+	mac_rx_clear(link->l_mch);
+}
+
+static void
+viona_worker_tx(viona_vring_t *ring, viona_link_t *link)
+{
+	proc_t *p = ttoproc(curthread);
+	size_t ntx = 0;
+
+	ASSERT(MUTEX_HELD(&ring->vr_lock));
+	ASSERT(ring->vr_state == (VRS_INIT|VRS_REQ_START));
+
+	ring->vr_state = VRS_RUN;
+	mutex_exit(&ring->vr_lock);
+
+	for (;;) {
+		boolean_t bail = B_FALSE;
+
 		atomic_or_16(ring->vr_used_flags, VRING_USED_F_NO_NOTIFY);
 		while (viona_vr_num_avail(ring)) {
 			viona_tx(link, ring);
-		}
-		if (copy_tx_mblks) {
-			mutex_enter(&link->l_tx_mutex);
-			if (link->l_tx_outstanding != 0) {
-				cv_wait_sig(&link->l_tx_cv, &link->l_tx_mutex);
-			}
-			mutex_exit(&link->l_tx_mutex);
+			ntx++;
 		}
 		atomic_and_16(ring->vr_used_flags, ~VRING_USED_F_NO_NOTIFY);
-	} while (viona_vr_num_avail(ring));
 
-	if ((link->l_features & VIRTIO_F_RING_NOTIFY_ON_EMPTY) != 0) {
-		viona_intr_tx(link);
+		/*
+		 * Check for available descriptors on the ring once more in
+		 * case a late addition raced with the NO_NOTIFY flag toggle.
+		 */
+		bail = VRING_NEED_BAIL(ring, p);
+		if (!bail && viona_vr_num_avail(ring)) {
+			continue;
+		}
+
+		VIONA_PROBE2(tx, viona_link_t *, link, uint_t, ntx);
+		ntx = 0;
+		if ((link->l_features & VIRTIO_F_RING_NOTIFY_ON_EMPTY) != 0) {
+			viona_intr_tx(link);
+		}
+
+		mutex_enter(&ring->vr_lock);
+		while (!bail && !viona_vr_num_avail(ring)) {
+			(void) cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
+			bail = VRING_NEED_BAIL(ring, p);
+		}
+		if (bail) {
+			break;
+		}
+		mutex_exit(&ring->vr_lock);
+	}
+
+	ASSERT(MUTEX_HELD(&ring->vr_lock));
+
+	while (ring->vr_xfer_outstanding != 0) {
+		cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
 	}
 }
 
-static int
-viona_ioc_rx_intr_clear(viona_link_t *link)
+static void
+viona_worker(void *arg)
 {
-	link->l_rx_intr = 0;
+	viona_vring_t *ring = (viona_vring_t *)arg;
+	viona_link_t *link = ring->vr_link;
+	proc_t *p = ttoproc(curthread);
 
-	return (0);
+	mutex_enter(&ring->vr_lock);
+	VERIFY(ring->vr_state == (VRS_RESET|VRS_SETUP));
+
+	/* Report worker thread as alive and notify creator */
+	ring->vr_state = VRS_INIT;
+	cv_broadcast(&ring->vr_cv);
+
+	while (ring->vr_state == VRS_INIT) {
+		(void) cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
+
+		if ((p->p_flag & SEXITING) != 0 ||
+		    (ring->vr_state & VRS_REQ_STOP) != 0) {
+			goto cleanup;
+		}
+	}
+	ASSERT(ring->vr_state & VRS_REQ_START);
+
+	/* Process actual work */
+	if (ring == &link->l_vrings[VIONA_VQ_RX]) {
+		viona_worker_rx(ring, link);
+	} else if (ring == &link->l_vrings[VIONA_VQ_TX]) {
+		viona_worker_tx(ring, link);
+	} else {
+		panic("unexpected ring: %p", ring);
+	}
+
+cleanup:
+	ring->vr_cur_aidx = 0;
+	ring->vr_state = VRS_RESET;
+	ring->vr_worker_thread = NULL;
+	cv_broadcast(&ring->vr_cv);
+	mutex_exit(&ring->vr_lock);
+
+	mutex_enter(&ttoproc(curthread)->p_lock);
+	lwp_exit();
+}
+
+static kthread_t *
+viona_create_worker(viona_vring_t *ring)
+{
+	k_sigset_t hold_set;
+	proc_t *p = curproc;
+	kthread_t *t;
+	klwp_t *lwp;
+
+	ASSERT(MUTEX_HELD(&ring->vr_lock));
+	ASSERT(ring->vr_state == VRS_RESET);
+
+	sigfillset(&hold_set);
+	lwp = lwp_create(viona_worker, (void *)ring, 0, p, TS_STOPPED,
+	    minclsyspri - 1, &hold_set, curthread->t_cid, 0);
+	if (lwp == NULL) {
+		return (NULL);
+	}
+
+	t = lwptot(lwp);
+	mutex_enter(&p->p_lock);
+	t->t_proc_flag = (t->t_proc_flag & ~TP_HOLDLWP) | TP_KTHREAD;
+	lwp_create_done(t);
+	mutex_exit(&p->p_lock);
+
+	return (t);
 }
 
 static int
-viona_ioc_tx_intr_clear(viona_link_t *link)
+viona_ioc_ring_intr_clear(viona_link_t *link, uint_t idx)
 {
-	link->l_tx_intr = 0;
+	if (idx >= VIONA_VQ_MAX) {
+		return (EINVAL);
+	}
 
+	link->l_vrings[idx].vr_intr_enabled = 0;
 	return (0);
 }
 
@@ -990,7 +1280,9 @@ vq_pushchain_mrgrx(viona_vring_t *ring, int num_bufs, used_elem_t *elem)
 static void
 viona_intr_rx(viona_link_t *link)
 {
-	if (atomic_cas_uint(&link->l_rx_intr, 0, 1) == 0) {
+	viona_vring_t *ring = &link->l_vrings[VIONA_VQ_RX];
+
+	if (atomic_cas_uint(&ring->vr_intr_enabled, 0, 1) == 0) {
 		pollwakeup(&link->l_pollhead, POLLIN);
 	}
 }
@@ -998,7 +1290,9 @@ viona_intr_rx(viona_link_t *link)
 static void
 viona_intr_tx(viona_link_t *link)
 {
-	if (atomic_cas_uint(&link->l_tx_intr, 0, 1) == 0) {
+	viona_vring_t *ring = &link->l_vrings[VIONA_VQ_TX];
+
+	if (atomic_cas_uint(&ring->vr_intr_enabled, 0, 1) == 0) {
 		pollwakeup(&link->l_pollhead, POLLOUT);
 	}
 }
@@ -1255,7 +1549,7 @@ static void
 viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 {
 	viona_link_t *link = (viona_link_t *)arg;
-	viona_vring_t *ring = &link->l_rx_vring;
+	viona_vring_t *ring = &link->l_vrings[VIONA_VQ_RX];
 	mblk_t *mprx = NULL, **mprx_prevp = &mprx;
 	mblk_t *mpdrop = NULL, **mpdrop_prevp = &mpdrop;
 	const boolean_t do_merge =
@@ -1319,33 +1613,47 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 }
 
 static void
-viona_desb_free(viona_desb_t *dp)
+viona_tx_done(viona_vring_t *ring, uint32_t len, uint16_t cookie)
 {
-	viona_link_t		*link;
-	viona_vring_t	*ring;
-	uint_t			ref;
+	viona_link_t *link = ring->vr_link;
 
-	ref = atomic_dec_uint_nv(&dp->d_ref);
-	if (ref != 0)
-		return;
-
-	link = dp->d_link;
-	ring = &link->l_tx_vring;
-
-	vq_pushchain(ring, dp->d_len, dp->d_cookie);
-
-	kmem_cache_free(viona_desb_cache, dp);
+	vq_pushchain(ring, len, cookie);
 
 	if ((*ring->vr_avail_flags & VRING_AVAIL_F_NO_INTERRUPT) == 0) {
 		viona_intr_tx(link);
 	}
-	if (copy_tx_mblks) {
-		mutex_enter(&link->l_tx_mutex);
-		if (--link->l_tx_outstanding == 0) {
-			cv_broadcast(&link->l_tx_cv);
-		}
-		mutex_exit(&link->l_tx_mutex);
+}
+
+static void
+viona_desb_release(viona_desb_t *dp)
+{
+	viona_vring_t *ring = dp->d_ring;
+	uint_t ref;
+	uint32_t len;
+	uint16_t cookie;
+
+	ref = atomic_dec_uint_nv(&dp->d_ref);
+	if (ref > 1) {
+		return;
 	}
+
+	/*
+	 * The desb corresponding to this index must be ready for reuse before
+	 * the descriptor is returned to the guest via the 'used' ring.
+	 */
+	len = dp->d_len;
+	cookie = dp->d_cookie;
+	dp->d_len = 0;
+	dp->d_cookie = 0;
+	dp->d_ref = 0;
+
+	viona_tx_done(ring, len, cookie);
+
+	mutex_enter(&ring->vr_lock);
+	if ((--ring->vr_xfer_outstanding) == 0) {
+		cv_broadcast(&ring->vr_cv);
+	}
+	mutex_exit(&ring->vr_lock);
 }
 
 static void
@@ -1353,41 +1661,56 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 {
 	struct iovec		iov[VTNET_MAXSEGS];
 	uint16_t		cookie;
-	int			i, n;
+	int			n;
+	uint32_t		len;
 	mblk_t			*mp_head, *mp_tail, *mp;
-	viona_desb_t		*dp;
+	viona_desb_t		*dp = NULL;
 	mac_client_handle_t	link_mch = link->l_mch;
 
 	mp_head = mp_tail = NULL;
 
 	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
 	if (n <= 0) {
-		VIONA_PROBE1(bad_tx, viona_vring_t *, ring);
+		VIONA_PROBE1(tx_absent, viona_vring_t *, ring);
 		return;
 	}
 
-	dp = kmem_cache_alloc(viona_desb_cache, KM_SLEEP);
-	dp->d_frtn.free_func = viona_desb_free;
-	dp->d_frtn.free_arg = (void *)dp;
-	dp->d_link = link;
-	dp->d_cookie = cookie;
+	if (ring->vr_desb != NULL) {
+		dp = &ring->vr_desb[cookie];
 
-	dp->d_ref = 0;
-	dp->d_len = iov[0].iov_len;
+		/*
+		 * If the guest driver is operating properly, each desb slot
+		 * should be available for use when processing a TX descriptor
+		 * from the 'avail' ring.  In the case of drivers that reuse a
+		 * descriptor before it has been posted to the 'used' ring, the
+		 * data is simply dropped.
+		 */
+		if (atomic_cas_uint(&dp->d_ref, 0, 1) != 0) {
+			dp = NULL;
+			goto drop_fail;
+		}
+		dp->d_cookie = cookie;
+	}
 
-	for (i = 1; i < n; i++) {
-		dp->d_ref++;
-		dp->d_len += iov[i].iov_len;
-		if (copy_tx_mblks) {
+	len = iov[0].iov_len;
+	for (uint_t i = 1; i < n; i++) {
+		if (dp != NULL) {
 			mp = desballoc((uchar_t *)iov[i].iov_base,
 			    iov[i].iov_len, BPRI_MED, &dp->d_frtn);
-			ASSERT(mp);
+			if (mp == NULL) {
+				goto drop_fail;
+			}
+			dp->d_ref++;
 		} else {
 			mp = allocb(iov[i].iov_len, BPRI_MED);
-			ASSERT(mp);
+			if (mp == NULL) {
+				goto drop_fail;
+			}
 			bcopy((uchar_t *)iov[i].iov_base, mp->b_wptr,
 			    iov[i].iov_len);
 		}
+
+		len += iov[i].iov_len;
 		mp->b_wptr += iov[i].iov_len;
 		if (mp_head == NULL) {
 			ASSERT(mp_tail == NULL);
@@ -1398,13 +1721,61 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 		}
 		mp_tail = mp;
 	}
-	if (copy_tx_mblks == B_FALSE) {
-		viona_desb_free(dp);
+
+	if (dp != NULL) {
+		dp->d_len = len;
+		mutex_enter(&ring->vr_lock);
+		ring->vr_xfer_outstanding++;
+		mutex_exit(&ring->vr_lock);
+	} else {
+		/*
+		 * If the data was cloned out of the ring, the descriptors can
+		 * be marked as 'used' now, rather than deferring that action
+		 * until after successful packet transmission.
+		 */
+		viona_tx_done(ring, len, cookie);
 	}
-	if (copy_tx_mblks) {
-		mutex_enter(&link->l_tx_mutex);
-		link->l_tx_outstanding++;
-		mutex_exit(&link->l_tx_mutex);
-	}
+
 	mac_tx(link_mch, mp_head, 0, MAC_DROP_ON_NO_DESC, NULL);
+	return;
+
+drop_fail:
+	/*
+	 * On the off chance that memory is not available via the desballoc or
+	 * allocb calls, there are few options left besides to fail and drop
+	 * the frame on the floor.
+	 */
+
+	if (dp != NULL) {
+		/*
+		 * Take an additional reference on the desb handle (if present)
+		 * so any desballoc-sourced mblks can release their hold on it
+		 * without the handle reaching its final state and executing
+		 * its clean-up logic.
+		 */
+		dp->d_ref++;
+	}
+
+	/*
+	 * Free any already-allocated blocks and sum up the total length of the
+	 * dropped data to be released to the used ring.
+	 */
+	freemsgchain(mp_head);
+	len = 0;
+	for (uint_t i = 0; i < n; i++) {
+		len += iov[i].iov_len;
+	}
+
+	if (dp != NULL) {
+		VERIFY(dp->d_ref == 2);
+
+		/* Clean up the desb handle, releasing the extra hold. */
+		dp->d_len = 0;
+		dp->d_cookie = 0;
+		dp->d_ref = 0;
+	}
+
+	VIONA_PROBE3(tx_drop, viona_vring_t *, ring, uint_t, len,
+	    uint16_t, cookie);
+	viona_tx_done(ring, len, cookie);
 }
