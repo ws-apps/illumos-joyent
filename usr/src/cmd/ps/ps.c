@@ -27,7 +27,7 @@
  */
 
 /*
- * Copyright 2015 Joyent, Inc.
+ * Copyright (c) 2017, Joyent, Inc.
  */
 
 /*	Copyright (c) 1984, 1986, 1987, 1988, 1989 AT&T	*/
@@ -108,6 +108,7 @@ enum fname {	/* enumeration of field names */
 	F_SID,		/* session id */
 	F_PSR,		/* bound processor */
 	F_LWP,		/* lwp-id */
+	F_LWPNAME,	/* lwp name */
 	F_NLWP,		/* number of lwps */
 	F_OPRI,		/* old priority (obsolete) */
 	F_PRI,		/* new priority */
@@ -177,6 +178,7 @@ static struct def_field fname[] = {
 	{ "sid",	"SID",		5,	5	},
 	{ "psr",	"PSR",		3,	2	},
 	{ "lwp",	"LWP",		6,	2	},
+	{ "lname",	"LNAME",	32,	8	},
 	{ "nlwp",	"NLWP",		4,	2	},
 	{ "opri",	"PRI",		3,	2	},
 	{ "pri",	"PRI",		3,	2	},
@@ -211,8 +213,8 @@ static struct def_field fname[] = {
 	{ "zone",	"ZONE",		8,	8	},
 	{ "zoneid",	"ZONEID",	5,	5	},
 	{ "ctid",	"CTID",		5,	5	},
-	{ "lgrp",	"LGRP",		4,	2 	},
-	{ "dmodel",	"DMODEL",	6,	6 	},
+	{ "lgrp",	"LGRP",		4,	2	},
+	{ "dmodel",	"DMODEL",	6,	6	},
 };
 
 #define	NFIELDS	(sizeof (fname) / sizeof (fname[0]))
@@ -859,7 +861,7 @@ stdmain(int argc, char **argv)
 			(void) printf(" %*s %*s", pidwidth, "PGID",
 			    pidwidth, "SID");
 		if (Lflg)
-			(void) printf("   LWP");
+			(void) printf("   LWP   LNAME");
 		if (Pflg)
 			(void) printf(" PSR");
 		if (Lflg && fflg)
@@ -1465,8 +1467,10 @@ prcom(psinfo_t *psinfo, char *ttyp)
 		(void) printf(" %*d", pidwidth,
 		    (int)psinfo->pr_sid);	/* SID  */
 	}
-	if (Lflg)
-		(void) printf(" %5d", (int)psinfo->pr_lwp.pr_lwpid); /* LWP */
+	if (Lflg) {
+		(void) printf(" %5d %8s", (int)psinfo->pr_lwp.pr_lwpid,
+		    psinfo->pr_lwp.pr_lwpname); /* LWP */
+	}
 	if (Pflg) {
 		if (psinfo->pr_lwp.pr_bindpro == PBIND_NONE)	/* PSR */
 			(void) printf("   -");
