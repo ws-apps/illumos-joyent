@@ -1269,8 +1269,42 @@ vm_map_remove(vm_map_t map, vm_offset_t start, vm_offset_t end)
 int
 vm_map_wire(vm_map_t map, vm_offset_t start, vm_offset_t end, int flags)
 {
-	/* XXXJOY: punt on wiring for now */
-	return (-1);
+	struct vmspace *vms = VMMAP_TO_VMSPACE(map);
+	const uintptr_t addr = start;
+	const size_t size = end - start;
+	vmspace_mapping_t *vmsm;
+	struct vm_object *vmo;
+	uint_t prot;
+
+	mutex_enter(&vms->vms_lock);
+
+	/* For the time being, only exact-match mappings are expected */
+	if ((vmsm = vm_mapping_find(vms, addr, size)) == NULL) {
+		mutex_exit(&vms->vms_lock);
+		return (FC_NOMAP);
+	}
+	vmo = vmsm->vmsm_object;
+	prot = vmsm->vmsm_prot;
+
+	for (uintptr_t pos = addr; pos < end;) {
+		pfn_t pfn;
+		uintptr_t pg_size, map_addr;
+		uint_t map_lvl = 0;
+
+		/* XXXJOY: punt on large pages for now */
+		pfn = vmo->vmo_pager(vmo, VMSM_OFFSET(vmsm, pos), NULL, NULL);
+		pg_size = LEVEL_SIZE(map_lvl);
+		map_addr = P2ALIGN(pos, pg_size);
+		VERIFY(pfn != PFN_INVALID);
+
+		VERIFY0(vmspace_pmap_wire(vms, map_addr, pfn, map_lvl, prot,
+		    vmo->vmo_attr));
+		pos += pg_size;
+	}
+
+	mutex_exit(&vms->vms_lock);
+
+	return (0);
 }
 
 /* Provided custom for bhyve 'devmem' segment mapping */
