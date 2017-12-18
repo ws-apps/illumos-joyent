@@ -808,6 +808,11 @@ sglist_append_phys(struct sglist *sg, vm_paddr_t pa, size_t len)
 	uint_t idx;
 	struct sglist_ent *ent;
 
+	/* Restrict to page-aligned entries */
+	if ((pa & PAGEOFFSET) != 0 || (len & PAGEOFFSET) != 0 || len == 0) {
+		return (EINVAL);
+	}
+
 	mutex_enter(&sg->sg_lock);
 	idx = sg->sg_next;
 	if (idx >= sg->sg_len) {
@@ -818,7 +823,7 @@ sglist_append_phys(struct sglist *sg, vm_paddr_t pa, size_t len)
 	ent = &sg->sg_entries[idx];
 	ASSERT(ent->sge_pa == 0 && ent->sge_len == 0);
 	ent->sge_pa = pa;
-	ent->sge_len =len;
+	ent->sge_len = len;
 	sg->sg_next++;
 
 	mutex_exit(&sg->sg_lock);
@@ -875,6 +880,7 @@ vm_object_pager_heap(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
 static pfn_t
 vm_object_pager_sg(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
 {
+	const uintptr_t aoff = ALIGN2PAGE(off);
 	uint_t level = 0;
 	uintptr_t pos = 0;
 	struct sglist *sg;
@@ -891,11 +897,10 @@ vm_object_pager_sg(vm_object_t vmo, uintptr_t off, pfn_t *lpfn, uint_t *lvl)
 
 	ent = &sg->sg_entries[0];
 	for (uint_t i = 0; i < sg->sg_next; i++, ent++) {
-		if (off >= pos && off < (pos + ent->sge_len)) {
-			/* XXXJOY: Only support single-page maps for now */
-			VERIFY(ent->sge_len == PAGESIZE);
+		if (aoff >= pos && aoff < (pos + ent->sge_len)) {
+			/* XXXJOY: Punt on large pages for now */
 			level = 0;
-			pfn = mmu_btop(ent->sge_pa);
+			pfn = mmu_btop(ent->sge_pa + (aoff - pos));
 			break;
 		}
 		pos += ent->sge_len;
