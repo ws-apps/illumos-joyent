@@ -153,6 +153,7 @@ smp_rendezvous(void (* setup_func)(void *), void (* action_func)(void *),
 
 struct kmem_item {
 	void			*addr;
+	void			*paddr;
 	size_t			size;
 	LIST_ENTRY(kmem_item)	next;
 };
@@ -178,6 +179,7 @@ malloc(unsigned long size, struct malloc_type *mtp, int flags)
 	mutex_enter(&kmem_items_lock);
 	i = p + size;
 	i->addr = p;
+	i->paddr = (void *)PHYS_TO_DMAP(vtophys(p));
 	i->size = size;
 
 	LIST_INSERT_HEAD(&kmem_items, i, next);
@@ -193,14 +195,15 @@ free(void *addr, struct malloc_type *mtp)
 
 	mutex_enter(&kmem_items_lock);
 	LIST_FOREACH(i, &kmem_items, next) {
-		if (i->addr == addr)
+		if (i->addr == addr ||
+		    i->paddr == addr)
 			break;
 	}
-	ASSERT(i != NULL);
+	VERIFY(i != NULL);
 	LIST_REMOVE(i, next);
 	mutex_exit(&kmem_items_lock);
 
-	kmem_free(addr, i->size + sizeof (struct kmem_item));
+	kmem_free(i->addr, i->size + sizeof (struct kmem_item));
 }
 
 extern void *contig_alloc(size_t, ddi_dma_attr_t *, uintptr_t, int);
