@@ -109,8 +109,12 @@ struct pci_viona_softc {
 	int		vsc_isr;
 
 	datalink_id_t	vsc_linkid;
-	char		vsc_linkname[MAXLINKNAMELEN];
 	int		vsc_vnafd;
+
+	/* Configurable parameters */
+	char		vsc_linkname[MAXLINKNAMELEN];
+	uint32_t	vsc_feature_mask;
+	uint16_t	vsc_vq_size;
 
 	uint32_t	vsc_features;
 	uint8_t		vsc_macaddr[6];
@@ -135,15 +139,14 @@ pci_viona_iosize(struct pci_devinst *pi)
 }
 
 static uint16_t
-pci_viona_qsize(int qnum)
+pci_viona_qsize(struct pci_viona_softc *sc, int qnum)
 {
 	/* XXX no ctl queue currently */
 	if (qnum == VIONA_CTLQ) {
 		return (0);
 	}
 
-	/* XXX fixed currently. Maybe different for tx/rx/ctl */
-	return (VIONA_RINGSZ);
+	return (sc->vsc_vq_size);
 }
 
 static void
@@ -245,7 +248,7 @@ pci_viona_ring_init(struct pci_viona_softc *sc, uint64_t pfn)
 	sc->vsc_pfn[qnum] = (pfn << VRING_PFN);
 
 	vna_ri.ri_index = qnum;
-	vna_ri.ri_qsize = pci_viona_qsize(qnum);
+	vna_ri.ri_qsize = pci_viona_qsize(sc, qnum);
 	vna_ri.ri_qaddr = (pfn << VRING_PFN);
 	error = ioctl(sc->vsc_vnafd, VNA_IOC_RING_INIT, &vna_ri);
 
@@ -279,6 +282,90 @@ pci_viona_viona_init(struct vmctx *ctx, struct pci_viona_softc *sc)
 }
 
 static int
+pci_viona_parse_opts(struct pci_viona_softc *sc, char *opts)
+{
+	char *next, *cp, *vnic = NULL;
+	int err = 0;
+
+	sc->vsc_vq_size = VIONA_RINGSZ;
+	sc->vsc_feature_mask = 0;
+
+	for (;opts != NULL && *opts != '\0'; opts = next) {
+		char *val;
+
+		if ((cp = strchr(opts, ',')) != NULL) {
+			*cp = '\0';
+			next = cp + 1;
+		} else {
+			next = NULL;
+		}
+
+		if ((cp = strchr(opts, '=')) == NULL) {
+			/* vnic chosen with bare name */
+			if (vnic != NULL) {
+				fprintf(stderr,
+				    "viona: unexpected vnic name '%s'", opts);
+				err = -1;
+			} else {
+				vnic = opts;
+			}
+			continue;
+		}
+
+		/* <param>=<value> handling */
+		val = cp + 1;
+		*cp = '\0';
+		if (strcmp(opts, "feature_mask") == 0) {
+			long num;
+
+			errno = 0;
+			num = strtol(val, NULL, 0);
+			if (errno != 0 || num < 0) {
+				fprintf(stderr,
+				    "viona: invalid mask '%s'", val);
+			} else {
+				sc->vsc_feature_mask = num;
+			}
+		} else if (strcmp(opts, "vqsize") == 0) {
+			long num;
+
+			errno = 0;
+			num = strtol(val, NULL, 0);
+			if (errno != 0) {
+				fprintf(stderr,
+				    "viona: invalid vsqize '%s'", val);
+				err = -1;
+			} else if (num <= 2 || num > 32768) {
+				fprintf(stderr,
+				    "viona: vqsize out of range", num);
+				err = -1;
+			} else if ((1 << (ffs(num) - 1)) != num) {
+				fprintf(stderr,
+				    "viona: vqsize must be power of 2", num);
+				err = -1;
+			} else {
+				sc->vsc_vq_size = num;
+			}
+		} else {
+			fprintf(stderr,
+			    "viona: unrecognized option '%s'", opts);
+			err = -1;
+		}
+	}
+	if (vnic == NULL) {
+		fprintf(stderr, "viona: vnic name required");
+		sc->vsc_linkname[0] = '\0';
+		err = -1;
+	} else {
+		(void) strlcpy(sc->vsc_linkname, vnic, MAXLINKNAMELEN);
+	}
+
+	DPRINTF(("viona=%p dev=%s vqsize=%x feature_mask=%x\n", sc,
+	    sc->vsc_linkname, sc->vsc_vq_size, sc->vsc_feature_mask));
+	return (err);
+}
+
+static int
 pci_viona_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 {
 	dladm_handle_t		handle;
@@ -302,7 +389,10 @@ pci_viona_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 
 	pthread_mutex_init(&sc->vsc_mtx, NULL);
 
-	strlcpy(sc->vsc_linkname, opts, MAXLINKNAMELEN);
+	if (pci_viona_parse_opts(sc, opts) != 0) {
+		free(sc);
+		return (1);
+	}
 
 	if ((status = dladm_open(&handle)) != DLADM_STATUS_OK) {
 		WPRINTF(("could not open /dev/dld"));
@@ -456,10 +546,14 @@ pci_viona_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	switch (offset) {
 	case VTCFG_R_GUESTCAP:
 		assert(size == 4);
+		value &= ~(sc->vsc_feature_mask);
 		err = ioctl(sc->vsc_vnafd, VNA_IOC_SET_FEATURES, &value);
-		if (err != 0)
+		if (err != 0) {
 			WPRINTF(("ioctl feature negotiation returned"
 			    " err = %d\n", err));
+		} else {
+			sc->vsc_features = value;
+		}
 		break;
 	case VTCFG_R_PFN:
 		assert(size == 4);
@@ -554,9 +648,11 @@ pci_viona_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 	case VTCFG_R_HOSTCAP:
 		assert(size == 4);
 		err = ioctl(sc->vsc_vnafd, VNA_IOC_GET_FEATURES, &value);
-		if (err != 0)
+		if (err != 0) {
 			WPRINTF(("ioctl get host features returned"
 			    " err = %d\n", err));
+		}
+		value &= ~sc->vsc_feature_mask;
 		break;
 	case VTCFG_R_GUESTCAP:
 		assert(size == 4);
@@ -568,7 +664,7 @@ pci_viona_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 		break;
 	case VTCFG_R_QNUM:
 		assert(size == 2);
-		value = pci_viona_qsize(sc->vsc_curq);
+		value = pci_viona_qsize(sc, sc->vsc_curq);
 		break;
 	case VTCFG_R_QSEL:
 		assert(size == 2);

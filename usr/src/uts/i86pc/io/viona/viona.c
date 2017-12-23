@@ -45,8 +45,12 @@
 #include <sys/strsun.h>
 #include <vm/seg_kmem.h>
 
+#include <sys/pattr.h>
 #include <sys/dls.h>
+#include <sys/dlpi.h>
 #include <sys/mac_client.h>
+#include <sys/mac_provider.h>
+#include <sys/mac_client_priv.h>
 
 #include <sys/vmm_drv.h>
 #include <sys/viona_io.h>
@@ -72,6 +76,10 @@
 #define	VRING_DESC_F_WRITE	(1 << 1)
 #define	VRING_DESC_F_INDIRECT	(1 << 2)
 
+#define	VIRTIO_NET_HDR_F_NEEDS_CSUM	(1 << 0)
+#define	VIRTIO_NET_HDR_F_DATA_VALID	(1 << 1)
+
+
 #define	VRING_AVAIL_F_NO_INTERRUPT	1
 
 #define	VRING_USED_F_NO_NOTIFY		1
@@ -80,6 +88,8 @@
 /*
  * Host capabilities
  */
+#define	VIRTIO_NET_F_CSUM	(1 <<  0)
+#define	VIRTIO_NET_F_GUEST_CSUM	(1 <<  1)
 #define	VIRTIO_NET_F_MAC	(1 <<  5) /* host supplies MAC */
 #define	VIRTIO_NET_F_MRG_RXBUF	(1 << 15) /* host can merge RX buffers */
 #define	VIRTIO_NET_F_STATUS	(1 << 16) /* config status field available */
@@ -87,10 +97,20 @@
 #define	VIRTIO_F_RING_INDIRECT_DESC	(1 << 28)
 #define	VIRTIO_F_RING_EVENT_IDX		(1 << 29)
 
-#define	VIONA_S_HOSTCAPS					\
-	(VIRTIO_NET_F_MAC | VIRTIO_NET_F_MRG_RXBUF |		\
-	VIRTIO_NET_F_STATUS |					\
-	VIRTIO_F_RING_NOTIFY_ON_EMPTY | VIRTIO_F_RING_INDIRECT_DESC)
+#define	VIONA_S_HOSTCAPS	(	\
+	VIRTIO_NET_F_GUEST_CSUM |	\
+	VIRTIO_NET_F_MAC |		\
+	VIRTIO_NET_F_MRG_RXBUF |	\
+	VIRTIO_NET_F_STATUS |		\
+	VIRTIO_F_RING_NOTIFY_ON_EMPTY |	\
+	VIRTIO_F_RING_INDIRECT_DESC)
+
+/* MAC_CAPAB_HCKSUM specifics of interest */
+#define	VIONA_CAP_HCKSUM_INTEREST	\
+	(HCKSUM_INET_PARTIAL |		\
+	HCKSUM_INET_FULL_V4 |		\
+	HCKSUM_INET_FULL_V6)
+
 
 #define	VIONA_PROBE(name)	DTRACE_PROBE(viona__##name)
 #define	VIONA_PROBE1(name, arg1, arg2)	\
@@ -203,7 +223,11 @@ struct viona_link {
 	boolean_t		l_destroyed;
 
 	viona_vring_t		l_vrings[VIONA_VQ_MAX];
+
 	uint32_t		l_features;
+	uint32_t		l_features_hw;
+	uint32_t		l_cap_csum;
+
 	uintptr_t		l_notify_ioport;
 	void			*l_notify_cookie;
 
@@ -493,12 +517,6 @@ viona_ioctl(dev_t dev, int cmd, intptr_t data, int md, cred_t *cr, int *rv)
 		return (viona_ioc_create(ss, dptr, md, cr));
 	case VNA_IOC_DELETE:
 		return (viona_ioc_delete(ss));
-	case VNA_IOC_GET_FEATURES:
-		val = VIONA_S_HOSTCAPS;
-		if (ddi_copyout(&val, dptr, sizeof (val), md) != 0) {
-			return (EFAULT);
-		}
-		return (0);
 	default:
 		break;
 	}
@@ -511,11 +529,18 @@ viona_ioctl(dev_t dev, int cmd, intptr_t data, int md, cred_t *cr, int *rv)
 	}
 
 	switch (cmd) {
+	case VNA_IOC_GET_FEATURES:
+		val = VIONA_S_HOSTCAPS | link->l_features_hw;
+		if (ddi_copyout(&val, dptr, sizeof (val), md) != 0) {
+			return (EFAULT);
+		}
+		break;
 	case VNA_IOC_SET_FEATURES:
 		if (ddi_copyin(dptr, &val, sizeof (val), md) != 0) {
 			return (EFAULT);
 		}
-		link->l_features = val & VIONA_S_HOSTCAPS;
+		val &= (VIONA_S_HOSTCAPS | link->l_features_hw);
+		link->l_features = val;
 		break;
 	case VNA_IOC_RING_INIT:
 		err = viona_ioc_ring_init(link, dptr, md);
@@ -576,6 +601,25 @@ viona_chpoll(dev_t dev, short events, int anyyet, short *reventsp,
 	return (0);
 }
 
+static void
+viona_get_mac_capab(viona_link_t *link)
+{
+	mac_handle_t mh = link->l_mh;
+	uint32_t cap = 0;
+
+	link->l_features_hw = 0;
+	if (mac_capab_get(mh, MAC_CAPAB_HCKSUM, &cap)) {
+		/*
+		 * Only report HW checksum ability if the underlying MAC
+		 * resource is capable of populating the L4 header.
+		 */
+		if ((cap & VIONA_CAP_HCKSUM_INTEREST) != 0) {
+			link->l_features_hw |= VIRTIO_NET_F_CSUM;
+		}
+		link->l_cap_csum = cap;
+	}
+}
+
 static int
 viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 {
@@ -617,6 +661,8 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 		goto bail;
 	}
 
+	viona_get_mac_capab(link);
+
 	(void) snprintf(cli_name, sizeof (cli_name), "%s-%d", VIONA_CLI_NAME,
 	    link->l_linkid);
 	err = mac_client_open(link->l_mh, &link->l_mch, cli_name, 0);
@@ -624,7 +670,6 @@ viona_ioc_create(viona_soft_state_t *ss, void *dptr, int md, cred_t *cr)
 		goto bail;
 	}
 
-	link->l_features = VIONA_S_HOSTCAPS;
 	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_RX]);
 	viona_ring_alloc(link, &link->l_vrings[VIONA_VQ_TX]);
 	ss->ss_link = link;
@@ -1402,6 +1447,16 @@ viona_recv_plain(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	bzero(hdr, hdr_sz);
 	copied += hdr_sz;
 
+	/* Add chksum bits, if needed */
+	if ((ring->vr_link->l_features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
+		uint32_t cksum_flags;
+
+		mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &cksum_flags);
+		if ((cksum_flags & HCK_FULLCKSUM_OK) != 0) {
+			hdr->vrh_flags |= VIRTIO_NET_HDR_F_DATA_VALID;
+		}
+	}
+
 	/* Release this chain */
 	vq_pushchain(ring, copied, cookie);
 	return (0);
@@ -1519,6 +1574,16 @@ viona_recv_merged(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	if (copied < MIN_BUF_SIZE || copied != msz) {
 		/* Do not override an existing error */
 		err = (err == 0) ? EINVAL : err;
+	}
+
+	/* Add chksum bits, if needed */
+	if ((ring->vr_link->l_features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
+		uint32_t cksum_flags;
+
+		mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &cksum_flags);
+		if ((cksum_flags & HCK_FULLCKSUM_OK) != 0) {
+			hdr->vrh_flags |= VIRTIO_NET_HDR_F_DATA_VALID;
+		}
 	}
 
 done:
@@ -1656,6 +1721,79 @@ viona_desb_release(viona_desb_t *dp)
 	mutex_exit(&ring->vr_lock);
 }
 
+static boolean_t
+viona_tx_csum(viona_link_t *link, const struct virtio_net_hdr *hdr,
+    mblk_t *mp, uint32_t len)
+{
+	const struct ether_header *eth;
+	uint_t eth_len = sizeof (struct ether_header);
+	ushort_t ftype;
+
+	eth = (const struct ether_header *)mp->b_rptr;
+	if (MBLKL(mp) < sizeof (*eth)) {
+		/* Buffers shorter than an ethernet header are hopeless */
+		return (B_FALSE);
+	}
+
+	ftype = eth->ether_type;
+	if (ftype == ETHERTYPE_VLAN) {
+		const struct ether_vlan_header *veth;
+
+		/* punt on QinQ for now */
+		eth_len = sizeof (struct ether_vlan_header);
+		veth = (const struct ether_vlan_header *)eth;
+		ftype = veth->ether_type;
+	}
+
+	/*
+	 * Partial checksum support from the NIC is ideal, since it most
+	 * closely maps to the interface defined by virtio.
+	 */
+	if ((link->l_cap_csum & HCKSUM_INET_PARTIAL) != 0) {
+		uint_t start, stuff, end;
+
+		/*
+		 * The lower-level driver is expecting these offsets to be
+		 * relative to the start of the L3 header rather than the
+		 * ethernet frame.
+		 */
+		start = hdr->vrh_csum_start - eth_len;
+		stuff = start + hdr->vrh_csum_offset;
+		end = len - eth_len;
+		mac_hcksum_set(mp, start, stuff, end, 0, HCK_PARTIALCKSUM);
+		return (B_TRUE);
+	}
+
+	/*
+	 * Without partial checksum support, look to the L3/L4 protocol
+	 * information to see if the NIC can handle it.  If not, the
+	 * checksum will need to calculated inline.
+	 */
+	if (ftype == ETHERTYPE_IP) {
+		if ((link->l_cap_csum & HCKSUM_INET_FULL_V4) != 0) {
+			mac_hcksum_set(mp, 0, 0, 0, 0, HCK_FULLCKSUM);
+			return (B_TRUE);
+		}
+
+		/* XXX: Implement manual fallback checksumming? */
+		VIONA_PROBE2(fail_hcksum, viona_link_t *, link, mblk_t *, mp);
+		return (B_FALSE);
+	} else if (ftype == ETHERTYPE_IPV6) {
+		if ((link->l_cap_csum & HCKSUM_INET_FULL_V6) != 0) {
+			mac_hcksum_set(mp, 0, 0, 0, 0, HCK_FULLCKSUM);
+			return (B_TRUE);
+		}
+
+		/* XXX: Implement manual fallback checksumming? */
+		VIONA_PROBE2(fail_hcksum6, viona_link_t *, link, mblk_t *, mp);
+		return (B_FALSE);
+	}
+
+	/* Cannot even emulate hcksum for unrecognized protocols */
+	VIONA_PROBE2(fail_hcksum_proto, viona_link_t *, link, mblk_t *, mp);
+	return (B_FALSE);
+}
+
 static void
 viona_tx(viona_link_t *link, viona_vring_t *ring)
 {
@@ -1666,6 +1804,7 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 	mblk_t			*mp_head, *mp_tail, *mp;
 	viona_desb_t		*dp = NULL;
 	mac_client_handle_t	link_mch = link->l_mch;
+	const struct virtio_net_hdr *hdr;
 
 	mp_head = mp_tail = NULL;
 
@@ -1692,7 +1831,13 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 		dp->d_cookie = cookie;
 	}
 
+	/* Grab the header and ensure it is of adequate length */
+	hdr = (const struct virtio_net_hdr *)iov[0].iov_base;
 	len = iov[0].iov_len;
+	if (len < sizeof (struct virtio_net_hdr)) {
+		goto drop_fail;
+	}
+
 	for (uint_t i = 1; i < n; i++) {
 		if (dp != NULL) {
 			mp = desballoc((uchar_t *)iov[i].iov_base,
@@ -1720,6 +1865,14 @@ viona_tx(viona_link_t *link, viona_vring_t *ring)
 			mp_tail->b_cont = mp;
 		}
 		mp_tail = mp;
+	}
+
+	/* Request hardware checksumming, if necessary */
+	if ((link->l_features & VIRTIO_NET_F_CSUM) != 0 &&
+	    (hdr->vrh_flags & VIRTIO_NET_HDR_F_NEEDS_CSUM) != 0) {
+		if (!viona_tx_csum(link, hdr, mp_head, len - iov[0].iov_len)) {
+			goto drop_fail;
+		}
 	}
 
 	if (dp != NULL) {
