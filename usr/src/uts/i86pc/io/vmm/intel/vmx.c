@@ -93,6 +93,7 @@ __FBSDID("$FreeBSD$");
 	(PROCBASED_INT_WINDOW_EXITING	|				\
 	 PROCBASED_NMI_WINDOW_EXITING)
 
+#ifdef __FreeBSD__
 #define	PROCBASED_CTLS_ONE_SETTING 					\
 	(PROCBASED_SECONDARY_CONTROLS	|				\
 	 PROCBASED_MWAIT_EXITING	|				\
@@ -102,6 +103,20 @@ __FBSDID("$FreeBSD$");
 	 PROCBASED_CTLS_WINDOW_SETTING	|				\
 	 PROCBASED_CR8_LOAD_EXITING	|				\
 	 PROCBASED_CR8_STORE_EXITING)
+#else
+/* We consider TSC offset a necessity for unsynched TSC handling */
+#define	PROCBASED_CTLS_ONE_SETTING 					\
+	(PROCBASED_SECONDARY_CONTROLS	|				\
+	 PROCBASED_TSC_OFFSET		|				\
+	 PROCBASED_MWAIT_EXITING	|				\
+	 PROCBASED_MONITOR_EXITING	|				\
+	 PROCBASED_IO_EXITING		|				\
+	 PROCBASED_MSR_BITMAPS		|				\
+	 PROCBASED_CTLS_WINDOW_SETTING	|				\
+	 PROCBASED_CR8_LOAD_EXITING	|				\
+	 PROCBASED_CR8_STORE_EXITING)
+#endif /* __FreeBSD__ */
+
 #define	PROCBASED_CTLS_ZERO_SETTING	\
 	(PROCBASED_CR3_LOAD_EXITING |	\
 	PROCBASED_CR3_STORE_EXITING |	\
@@ -896,6 +911,15 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 	struct vmcs *vmcs;
 	uint32_t exc_bitmap;
 
+#ifndef __FreeBSD__
+	/*
+	 * Grab an initial TSC reading to apply as an offset so the guest
+	 * TSC(s) appear to start from a zeroed value.
+	 */
+	uint64_t init_time = rdtsc();
+#endif
+
+
 	vmx = malloc(sizeof(struct vmx), M_VMX, M_WAITOK | M_ZERO);
 	if ((uintptr_t)vmx & PAGE_MASK) {
 		panic("malloc of struct vmx not aligned on %d byte boundary",
@@ -1006,6 +1030,15 @@ vmx_vminit(struct vm *vm, pmap_t pmap)
 		error += vmwrite(VMCS_MSR_BITMAP, msr_bitmap_pa);
 #endif
 		error += vmwrite(VMCS_VPID, vpid[i]);
+
+#ifndef __FreeBSD__
+		/*
+		 * Record initial TSC offset.  It will be loaded into the VMCS
+		 * during each setup for VMX entry.
+		 */
+		vmx->tsc_offset[i] = (uint64_t)(-init_time);
+		VERIFY(procbased_ctls & PROCBASED_TSC_OFFSET);
+#endif
 
 		/* exception bitmap */
 		if (vcpu_trace_exceptions(vm, i))
@@ -1176,6 +1209,30 @@ vmx_invvpid(struct vmx *vmx, int vcpu, pmap_t pmap, int running)
 	}
 }
 
+#ifndef __FreeBSD__
+/*
+ * Set the TSC adjustment, taking into account the offsets measured between
+ * host physical CPUs.  This is required even if the guest has not set a TSC
+ * offset since vCPUs inherit the TSC offset of whatever physical CPU it has
+ * migrated onto.  Without this mitigation, un-synched host TSCs will convey
+ * the appearance of TSC time-travel to the guest as its vCPUs migrate.
+ */
+static int
+vmx_apply_tsc_adjust(struct vmx *vmx, int vcpu)
+{
+	extern hrtime_t tsc_gethrtime_tick_delta(void);
+	uint64_t host_offset = (uint64_t)tsc_gethrtime_tick_delta();
+	uint64_t guest_offset = vmx->tsc_offset[vcpu];
+	int error;
+
+	ASSERT(vmx->cap[vcpu].proc_ctls & PROCBASED_TSC_OFFSET);
+
+	error = vmwrite(VMCS_TSC_OFFSET, guest_offset + host_offset);
+
+	return (error);
+}
+#endif
+
 static void
 vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 {
@@ -1207,6 +1264,10 @@ vmx_set_pcpu_defaults(struct vmx *vmx, int vcpu, pmap_t pmap)
 	vmcs_write(VMCS_HOST_GDTR_BASE, vmm_get_host_gdtrbase());
 	vmcs_write(VMCS_HOST_GS_BASE, vmm_get_host_gsbase());
 	vmx_invvpid(vmx, vcpu, pmap, 1);
+
+#ifndef __FreeBSD__
+	VERIFY0(vmx_apply_tsc_adjust(vmx, vcpu));
+#endif
 }
 
 /*
@@ -1263,6 +1324,7 @@ vmx_set_tsc_offset(struct vmx *vmx, int vcpu, uint64_t offset)
 {
 	int error;
 
+#ifdef __FreeBSD__
 	if ((vmx->cap[vcpu].proc_ctls & PROCBASED_TSC_OFFSET) == 0) {
 		vmx->cap[vcpu].proc_ctls |= PROCBASED_TSC_OFFSET;
 		vmcs_write(VMCS_PRI_PROC_BASED_CTLS, vmx->cap[vcpu].proc_ctls);
@@ -1270,6 +1332,10 @@ vmx_set_tsc_offset(struct vmx *vmx, int vcpu, uint64_t offset)
 	}
 
 	error = vmwrite(VMCS_TSC_OFFSET, offset);
+#else /* __FreeBSD__ */
+	vmx->tsc_offset[vcpu] = offset;
+	error = vmx_apply_tsc_adjust(vmx, vcpu);
+#endif /* __FreeBSD__ */
 
 	return (error);
 }
