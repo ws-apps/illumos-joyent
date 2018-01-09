@@ -125,18 +125,11 @@ __FBSDID("$FreeBSD$");
 #define	PROCBASED_CTLS2_ONE_SETTING	PROCBASED2_ENABLE_EPT
 #define	PROCBASED_CTLS2_ZERO_SETTING	0
 
-#ifdef __FreeBSD__
 #define	VM_EXIT_CTLS_ONE_SETTING					\
 	(VM_EXIT_HOST_LMA			|			\
 	VM_EXIT_SAVE_EFER			|			\
 	VM_EXIT_LOAD_EFER			|			\
 	VM_EXIT_ACKNOWLEDGE_INTERRUPT)
-#else
-#define	VM_EXIT_CTLS_ONE_SETTING					\
-	(VM_EXIT_HOST_LMA			|			\
-	VM_EXIT_SAVE_EFER			|			\
-	VM_EXIT_LOAD_EFER)
-#endif /* __FreeBSD__ */
 
 #define	VM_EXIT_CTLS_ZERO_SETTING	VM_EXIT_SAVE_DEBUG_CONTROLS
 
@@ -221,18 +214,12 @@ static u_int vpid_alloc_failed;
 SYSCTL_UINT(_hw_vmm_vmx, OID_AUTO, vpid_alloc_failed, CTLFLAG_RD,
 	    &vpid_alloc_failed, 0, NULL);
 
-#ifdef __FreeBSD__
 /*
  * Use the last page below 4GB as the APIC access address. This address is
  * occupied by the boot firmware so it is guaranteed that it will not conflict
  * with a page in system memory.
  */
 #define	APIC_ACCESS_ADDRESS	0xFFFFF000
-#else
-static void *vmx_apic_access_vaddr;
-static uintptr_t vmx_apic_access_paddr;
-#define	APIC_ACCESS_ADDRESS	vmx_apic_access_paddr
-#endif /* __FreeBSD__ */
 
 static int vmx_getdesc(void *arg, int vcpu, int reg, struct seg_desc *desc);
 static int vmx_getreg(void *arg, int vcpu, int reg, uint64_t *retval);
@@ -359,8 +346,6 @@ exit_reason_to_str(int reason)
 }
 #endif	/* KTR */
 
-#ifdef __FreeBSD__
-/* XXXJOY: This was previous masked out, still dangerous? */
 static int
 vmx_allow_x2apic_msrs(struct vmx *vmx)
 {
@@ -408,7 +393,6 @@ vmx_allow_x2apic_msrs(struct vmx *vmx)
 
 	return (error);
 }
-#endif
 
 u_long
 vmx_fix_cr0(u_long cr0)
@@ -532,14 +516,6 @@ vmx_cleanup(void)
 {
 	if (pirvec >= 0)
 		lapic_ipi_free(pirvec);
-
-#ifndef __FreeBSD__
-	/* Clean up APIC_ACCESS_ADDRESS page */
-	if (vmx_apic_access_paddr != 0) {
-		vmx_apic_access_paddr = 0;
-		kmem_free(vmx_apic_access_vaddr, PAGESIZE);
-	}
-#endif
 
 	if (vpid_unr != NULL) {
 		delete_unrhdr(vpid_unr);
@@ -734,10 +710,7 @@ vmx_init(int ipinum)
 	error = vmx_set_ctlreg(MSR_VMX_PROCBASED_CTLS2, MSR_VMX_PROCBASED_CTLS2,
 	    procbased2_vid_bits, 0, &tmp);
 	if (error == 0 && use_tpr_shadow) {
-#ifdef __FreeBSD__
-		/* XXXJOY: disabled until fixed and tested */
 		virtual_interrupt_delivery = 1;
-#endif
 		TUNABLE_INT_FETCH("hw.vmm.vmx.use_apic_vid",
 		    &virtual_interrupt_delivery);
 	}
@@ -826,11 +799,6 @@ vmx_init(int ipinum)
 	for (uint_t i = 0; i < MAXCPU; i++) {
 		vmxon_region_pa[i] = (char *)vtophys(vmxon_region[i]);
 	}
-
-	/* Allocate a physical page for the APIC_ACCESS_ADDRESS */
-	vmx_apic_access_vaddr = kmem_alloc(PAGESIZE, KM_SLEEP);
-	vmx_apic_access_paddr = vtophys(vmx_apic_access_vaddr);
-
 #endif /* __FreeBSD__ */
 
 	/* enable VMX operation */
@@ -866,7 +834,19 @@ vmx_trigger_hostintr(int vector)
 	func = ((long)gd->gd_hioffset << 16 | gd->gd_looffset);
 	vmx_call_isr(func);
 #else
-	/* XXXJOY: The host interrupt shoud have already been handled(?) */
+	uintptr_t func;
+	gate_desc_t *dp;
+
+	VERIFY(vector >= 32 && vector <= 255);
+	dp = &CPU->cpu_m.mcpu_idt[vector];
+
+	VERIFY(dp->sgd_ist == 0);
+	VERIFY(dp->sgd_p == 1);
+
+	func = (((uint64_t)dp->sgd_hi64offset << 32) |
+	    ((uint64_t)dp->sgd_hioffset << 16) |
+	    dp->sgd_looffset);
+	vmx_call_isr(func);
 #endif /* __FreeBSD__ */
 }
 
@@ -3447,8 +3427,6 @@ vmx_set_tmr(struct vlapic *vlapic, int vector, bool level)
 	VMCLEAR(vmcs);
 }
 
-#ifdef __FreeBSD__
-/* XXXJOY: This was previous masked out, still dangerous? */
 static void
 vmx_enable_x2apic_mode(struct vlapic *vlapic)
 {
@@ -3491,7 +3469,6 @@ vmx_enable_x2apic_mode(struct vlapic *vlapic)
 		    __func__, error));
 	}
 }
-#endif
 
 static void
 vmx_post_intr(struct vlapic *vlapic, int hostcpu)
@@ -3617,10 +3594,7 @@ vmx_vlapic_init(void *arg, int vcpuid)
 		vlapic->ops.pending_intr = vmx_pending_intr;
 		vlapic->ops.intr_accepted = vmx_intr_accepted;
 		vlapic->ops.set_tmr = vmx_set_tmr;
-#ifdef __FreeBSD__
-		/* XXXJOY: This was previous masked out, still dangerous? */
 		vlapic->ops.enable_x2apic_mode = vmx_enable_x2apic_mode;
-#endif
 	}
 
 	if (posted_interrupts)
