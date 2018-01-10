@@ -1071,7 +1071,7 @@ vm_mapping_gap(struct vmspace *vms, uintptr_t addr, size_t size)
 		const uintptr_t seg_end = vmsm->vmsm_addr + vmsm->vmsm_len;
 
 		if ((vmsm->vmsm_addr >= addr && vmsm->vmsm_addr < range_end) ||
-		    (seg_end >= addr && seg_end < range_end)) {
+		    (seg_end > addr && seg_end < range_end)) {
 			return (B_FALSE);
 		}
 	}
