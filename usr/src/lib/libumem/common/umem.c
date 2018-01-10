@@ -2278,7 +2278,7 @@ _umem_calloc(size_t nelem, size_t elsize, int umflag)
 
 		/* check for overflow */
 		if (total / nelem != elsize) {
-			errno = ENOMEM; /* XXX: EOVERFLOW instead? */
+			errno = ENOMEM; /* Follow what calloc(3C) does */
 			return (NULL);
 		}
 	}
