@@ -866,6 +866,7 @@ setup_subproc_env(boolean_t debug)
 	if ((res = zonecfg_setdevent(snap_hndl)) != Z_OK)
 		goto done;
 
+	dev_resources[0] = '\0';
 	while (zonecfg_getdevent(snap_hndl, &dtab) == Z_OK) {
 		struct zone_res_attrtab *rap;
 		char *match;
@@ -874,12 +875,21 @@ setup_subproc_env(boolean_t debug)
 
 		(void) strlcat(dev_resources, match, sizeof (dev_resources));
 		(void) strlcat(dev_resources, " ", sizeof (dev_resources));
+		set_zonecfg_env(RSRC_DEV, match, "path", match);
 
 		for (rap = dtab.zone_dev_attrp; rap != NULL;
 		    rap = rap->zone_res_attr_next)
 			set_zonecfg_env(RSRC_DEV, match,
 			    rap->zone_res_attr_name, rap->zone_res_attr_value);
 	}
+
+	for (char *p = dev_resources; *p != '\0'; p++) {
+		if (*p == '-') {
+			*p = '_';
+		}
+	}
+
+	(void) setenv("_ZONECFG_device_resources", dev_resources, 1);
 
 	(void) zonecfg_enddevent(snap_hndl);
 
