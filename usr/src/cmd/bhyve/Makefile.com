@@ -7,8 +7,12 @@
 # Management Information without the express written permission from
 # Pluribus Networks Inc is prohibited, and any such unauthorized removal
 # or alteration will be a violation of federal law.
+#
+# Copyright (c) 2018, Joyent, Inc.
+#
 
 PROG= bhyve
+BHYVEPROG= zhyve
 
 SRCS =	acpi.c			\
 	atkbdc.c		\
@@ -55,7 +59,8 @@ SRCS =	acpi.c			\
 	vmm_instruction_emul.c	\
 	xmsr.c			\
 	spinup_ap.c		\
-	bhyve_sol_glue.c
+	bhyve_sol_glue.c	\
+	zhyve.c
 
 OBJS = $(SRCS:.c=.o)
 
@@ -77,15 +82,22 @@ CPPFLAGS =	-I$(COMPAT)/freebsd -I$(CONTRIB)/freebsd \
 		-I$(SRC)/uts/i86pc \
 		-I$(SRC)/lib/libdladm/common \
 		-DWITHOUT_CAPSICUM
-LDLIBS +=	-lsocket -lnsl -ldlpi -ldladm -lkstat -lmd -luuid -lvmmapi -lz
+LDLIBS +=	-lsocket -lnsl -ldlpi -ldladm -lmd -luuid -lvmmapi -lz -lnvpair
 
 POST_PROCESS += ; $(GENSETDEFS) $@
 
-all: $(PROG)
+# Real main is in zhyve.c
+bhyverun.o :=	CPPFLAGS += -Dmain=bhyve_main
+
+all: $(PROG) $(BHYVEUSRSBIN)/$(BHYVEPROG)
 
 $(PROG): $(OBJS)
 	$(LINK.c) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 	$(POST_PROCESS)
+
+$(BHYVEUSRSBIN)/$(BHYVEPROG): $(ROOTUSRSBIN64)/$(PROG)
+	$(RM) $@
+	$(LN) $(ROOTUSRSBIN64)/$(PROG) $@
 
 install: all $(ROOTUSRSBINPROG)
 
