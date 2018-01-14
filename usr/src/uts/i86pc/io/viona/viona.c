@@ -32,9 +32,12 @@
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
+ *
+ * Copyright (c) 2018, Joyent, Inc.
  */
 #include <sys/conf.h>
 #include <sys/file.h>
+#include <sys/fs/sdev_plugin.h>
 #include <sys/stat.h>
 #include <sys/ddi.h>
 #include <sys/disp.h>
@@ -64,8 +67,9 @@
 
 #define	VIONA_CTL_MINOR		0
 #define	VIONA_CTL_NODE_NAME	"ctl"
+#define VIONA_DEV_DIR		"/dev/viona"
 
-#define	VIONA_CLI_NAME		"viona"
+#define	VIONA_CLI_NAME		"viona"		/* MAC client name */
 
 #define	VTNET_MAXSEGS		32
 
@@ -119,6 +123,10 @@
 	DTRACE_PROBE2(viona__##name, arg1, arg2, arg3, arg4)
 #define	VIONA_PROBE3(name, arg1, arg2, arg3, arg4, arg5, arg6)	\
 	DTRACE_PROBE3(viona__##name, arg1, arg2, arg3, arg4, arg5, arg6)
+#define	VIONA_PROBE5(name, arg1, arg2, arg3, arg4, arg5, arg6, arg7, arg8, \
+	arg9, arg10) \
+	DTRACE_PROBE5(viona__##name, arg1, arg2, arg3, arg4, arg5, arg6, arg7, \
+	arg8, arg9, arg10)
 #define	VIONA_PROBE_BAD_RING_ADDR(r, a)		\
 	VIONA_PROBE2(bad_ring_addr, viona_vring_t *, r, void *, (void *)(a))
 
@@ -256,6 +264,8 @@ typedef struct used_elem {
 static void			*viona_state;
 static dev_info_t		*viona_dip;
 static id_space_t		*viona_minors;
+static kmem_cache_t		*viona_desb_cache;
+static sdev_plugin_hdl_t	viona_sdev_hdl;
 
 /*
  * copy tx mbufs from virtio ring to avoid necessitating a wait for packet
@@ -263,9 +273,8 @@ static id_space_t		*viona_minors;
  */
 static boolean_t		viona_force_copy_tx_mblks = B_FALSE;
 
-extern struct vm *vm_lookup_by_name(char *name);
-extern uint64_t vm_gpa2hpa(struct vm *vm, uint64_t gpa, size_t len);
-
+static int viona_info(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg,
+    void **result);
 static int viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd);
 static int viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd);
 static int viona_open(dev_t *devp, int flag, int otype, cred_t *credp);
@@ -322,7 +331,7 @@ static struct cb_ops viona_cb_ops = {
 static struct dev_ops viona_ops = {
 	DEVO_REV,
 	0,
-	nodev,
+	viona_info,
 	nulldev,
 	nulldev,
 	viona_attach,
@@ -344,19 +353,66 @@ static struct modlinkage modlinkage = {
 	MODREV_1, &modldrv, NULL
 };
 
+static sdev_plugin_validate_t
+viona_sdev_validate(sdev_ctx_t ctx)
+{
+	minor_t minor;
+
+	if (strcmp(sdev_ctx_name(ctx), VIONA_CTL_NODE_NAME) != 0)
+		return (SDEV_VTOR_INVALID);
+
+	VERIFY3S(sdev_ctx_minor(ctx, &minor), ==, 0);
+
+	if (minor != VIONA_CTL_MINOR)
+		return (SDEV_VTOR_STALE);
+
+	return (SDEV_VTOR_VALID);
+}
+
+static int
+viona_sdev_filldir(sdev_ctx_t ctx)
+{
+	int ret;
+
+	if (strcmp(sdev_ctx_path(ctx), VIONA_DEV_DIR) != 0)
+		return (EINVAL);
+
+	ret = sdev_plugin_mknod(ctx, VIONA_CTL_NODE_NAME, S_IFCHR,
+	    makedevice(ddi_driver_major(viona_dip), VIONA_CTL_MINOR));
+	if (ret == EEXIST)
+		ret = 0;
+
+	return (ret);
+}
+
+/* ARGSUSED */
+void
+viona_sdev_inactive(sdev_ctx_t ctx)
+{
+	/* Nothing to do */
+}
+
+static struct sdev_plugin_ops viona_sdev_ops = {
+	.spo_version = SDEV_PLUGIN_VERSION,
+	.spo_flags = SDEV_PLUGIN_SUBDIR,
+	.spo_validate = viona_sdev_validate,
+	.spo_filldir = viona_sdev_filldir,
+	.spo_inactive = viona_sdev_inactive
+};
+
 int
 _init(void)
 {
 	int	ret;
 
-	ret = ddi_soft_state_init(&viona_state,
-	    sizeof (viona_soft_state_t), 0);
-	if (ret == 0) {
-		ret = mod_install(&modlinkage);
-		if (ret != 0) {
-			ddi_soft_state_fini(&viona_state);
-			return (ret);
-		}
+	ret = ddi_soft_state_init(&viona_state, sizeof (viona_soft_state_t), 0);
+	if (ret != 0)
+		return (ret);
+
+	ret = mod_install(&modlinkage);
+	if (ret != 0) {
+		ddi_soft_state_fini(&viona_state);
+		return (ret);
 	}
 
 	return (ret);
@@ -397,6 +453,28 @@ set_viona_tx_mode()
 	viona_force_copy_tx_mblks = B_FALSE;
 }
 
+/* ARGSUSED */
+static int
+viona_info(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg, void **result)
+{
+	int error;
+
+	switch (cmd) {
+	case DDI_INFO_DEVT2DEVINFO:
+		*result = (void *)viona_dip;
+		error = DDI_SUCCESS;
+		break;
+	case DDI_INFO_DEVT2INSTANCE:
+		*result = (void *)0;
+		error = DDI_SUCCESS;
+		break;
+	default:
+		error = DDI_FAILURE;
+		break;
+	}
+	return (error);
+}
+
 static int
 viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
@@ -414,6 +492,15 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 
 	viona_dip = dip;
 
+	viona_sdev_hdl = sdev_plugin_register("viona", &viona_sdev_ops, NULL);
+	if (viona_sdev_hdl == NULL) {
+		ddi_remove_minor_node(dip, VIONA_CTL_NODE_NAME);
+		kmem_cache_destroy(viona_desb_cache);
+		viona_desb_cache = NULL;
+		viona_dip = NULL;
+		return (DDI_FAILURE);
+	}
+
 	set_viona_tx_mode();
 	ddi_report_dev(viona_dip);
 
@@ -426,6 +513,13 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	if (cmd != DDI_DETACH) {
 		return (DDI_FAILURE);
 	}
+
+	if (sdev_plugin_unregister(viona_sdev_hdl) != 0) {
+		return (DDI_FAILURE);
+	}
+	viona_sdev_hdl = NULL;
+
+	kmem_cache_destroy(viona_desb_cache);
 
 	id_space_destroy(viona_minors);
 
@@ -445,9 +539,15 @@ viona_open(dev_t *devp, int flag, int otype, cred_t *credp)
 	if (otype != OTYP_CHR) {
 		return (EINVAL);
 	}
+#if 0
+	/*
+	 * XXX-mg: drv_priv() is wrong, but I'm not sure what is right.
+	 * Should the check be at open() or ioctl()?
+	 */
 	if (drv_priv(credp) != 0) {
 		return (EPERM);
 	}
+#endif
 	if (getminor(*devp) != VIONA_CTL_MINOR) {
 		return (ENXIO);
 	}
@@ -479,9 +579,12 @@ viona_close(dev_t dev, int flag, int otype, cred_t *credp)
 		return (EINVAL);
 	}
 
+#if 0
+	/* XXX-mg */
 	if (drv_priv(credp) != 0) {
 		return (EPERM);
 	}
+#endif
 
 	minor = getminor(dev);
 
@@ -1537,6 +1640,7 @@ viona_recv_merged(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	n = vq_popchain(ring, iov, VTNET_MAXSEGS, &cookie);
 	if (n <= 0) {
 		/* Without available buffers, the frame must be dropped. */
+		VIONA_PROBE2(no_space, viona_vring_t *, ring, mblk_t *, mp);
 		return (ENOSPC);
 	}
 	if (iov[0].iov_len < hdr_sz) {
@@ -1626,6 +1730,9 @@ viona_recv_merged(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	 */
 	if (copied < MIN_BUF_SIZE || copied != msz) {
 		/* Do not override an existing error */
+		VIONA_PROBE5(too__short, viona_vring_t *, ring,
+		    uint16_t, cookie, mblk_t *, mp, size_t, copied,
+		    size_t, msz);
 		err = (err == 0) ? EINVAL : err;
 	}
 
