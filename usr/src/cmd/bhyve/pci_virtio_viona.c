@@ -529,7 +529,7 @@ static void
 pci_viona_lintrupdate(struct pci_devinst *pi)
 {
 	struct pci_viona_softc *sc = pi->pi_arg;
-	boolean_t msix_on, do_toggle = B_FALSE;
+	boolean_t msix_on = B_FALSE;
 
 	pthread_mutex_lock(&sc->vsc_mtx);
 	msix_on = pci_msix_enabled(pi) && (pi->pi_msix.function_mask == 0);
