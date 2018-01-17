@@ -141,7 +141,9 @@ main(int argc, char **argv)
 	fd = open(ZHYVE_LOG_FILE, O_WRONLY|O_CREAT, 0644);
 	assert(fd >= 0);
 	(void) dup2(fd, STDOUT_FILENO);
+	setvbuf(stdout, NULL, _IONBF, 0);
 	(void) dup2(fd, STDERR_FILENO);
+	setvbuf(stderr, NULL, _IONBF, 0);
 	if (fd != STDOUT_FILENO && fd != STDERR_FILENO) {
 		(void) close(fd);
 	}
