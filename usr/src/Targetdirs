@@ -61,20 +61,12 @@ i386_DIRS= \
 	/platform/i86pc \
 	/usr/lib/brand/bhyve \
 	/usr/lib/brand/bhyve/root \
-	/usr/lib/brand/bhyve/root/dev \
-	/usr/lib/brand/bhyve/root/etc \
-	/usr/lib/brand/bhyve/root/etc/svc \
-	/usr/lib/brand/bhyve/root/etc/svc/volatile \
 	/usr/lib/brand/bhyve/root/lib \
-	/usr/lib/brand/bhyve/root/system \
-	/usr/lib/brand/bhyve/root/contract \
 	/usr/lib/brand/bhyve/root/usr \
 	/usr/lib/brand/bhyve/root/usr/lib \
 	/usr/lib/brand/bhyve/root/usr/sbin \
 	/usr/lib/brand/bhyve/root/usr/share \
 	/usr/lib/brand/bhyve/root/usr/share/bhyve \
-	/usr/lib/brand/bhyve/root/var \
-	/usr/lib/brand/bhyve/root/var/run \
 	/usr/lib/brand/lx \
 	/usr/lib/brand/lx/amd64 \
 	/usr/lib/brand/lx/distros \
