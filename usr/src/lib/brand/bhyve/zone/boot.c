@@ -62,7 +62,6 @@
 #define	BHYVE_ARGS_FILE		BHYVE_DIR "/" "zhyve.cmd"
 
 #define ZH_MAXARGS		100
-#define ROMFILE			"/usr/share/bhyve/BHYVE_UEFI.fd"
 
 boolean_t debug;
 
@@ -262,6 +261,38 @@ add_nets(int *argc, char **argv)
 	return (0);
 }
 
+int
+add_lpc(int *argc, char **argv)
+{
+	char *lpcdevs[] = { "bootrom", "com1", "com2", NULL };
+	int i;
+	char *val;
+	char conf[MAXPATHLEN];
+
+	if (add_arg(argc, argv, "-s") != 0 ||
+	    add_arg(argc, argv, "1,lpc") != 0) {
+		return (-1);
+	}
+
+	for (i = 0; lpcdevs[i] != NULL; i++) {
+		if ((val = get_zcfg_var("attr", lpcdevs[i], NULL)) == NULL) {
+			continue;
+		}
+		if (snprintf(conf, sizeof (conf), "%s,%s", lpcdevs[i], val) >=
+		    sizeof (conf)) {
+			(void) printf("Error: value of attr '%s' too long\n",
+			    lpcdevs[i]);
+			return (-1);
+		}
+		if (add_arg(argc, argv, "-l") != 0 ||
+		    add_arg(argc, argv, conf) != 0) {
+			return (-1);
+		}
+	}
+
+	return (0);
+}
+
 /*
  * Write the entire buffer or return an error.  This function could be more
  * paranoid and call fdsync() at the end.  That's not really need for this use
@@ -305,9 +336,6 @@ main(int argc, char **argv)
 	char *zhargv[ZH_MAXARGS] = {
 		"zhyve",		/* Squats on argv[0] */
 		"-P", "-H",		/* Guest exits on pause and halt isns */
-		"-s", "1,lpc",		/* LPC PCI-ISA bridge at PCI 0:1:0 */
-		"-l", "bootrom," ROMFILE,
-		"-l", "com1,/dev/zconsole",
 		NULL };
 	int zhargc;
 	nvlist_t *nvl;
@@ -332,7 +360,8 @@ main(int argc, char **argv)
 		dprintf(("def_arg: argv[%d]='%s'\n", zhargc, zhargv[zhargc]));
 	}
 
-	if (add_cpu(&zhargc, (char **)&zhargv) != 0 ||
+	if (add_lpc(&zhargc, (char **)&zhargv) != 0 ||
+	    add_cpu(&zhargc, (char **)&zhargv) != 0 ||
 	    add_ram(&zhargc, (char **)&zhargv) != 0 ||
 	    add_disks(&zhargc, (char **)&zhargv) != 0 ||
 	    add_nets(&zhargc, (char **)&zhargv) != 0 ||

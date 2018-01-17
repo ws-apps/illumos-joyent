@@ -117,6 +117,9 @@ parse_options_file(const char *path, uint *argcp, char ***argvp)
 	free(buf);
 	(void) close(fd);
 
+	(void) printf("Configuration from %s:\n", path);
+	nvlist_print(stdout, nvl);
+
 	return (ret);
 }
 
