@@ -12,7 +12,7 @@
 #
 
 PROG =		bhyve
-SHAREFILES =	BHYVE_UEFI.fd
+SHAREFILES =	BHYVE_UEFI.fd BHYVE_UEFI_CSM.fd
 
 USRSHAREDIR =		$(ROOT)/usr/share/bhyve
 BHYVEUSRSHAREDIR =	$(ROOT)/usr/lib/brand/bhyve/root/usr/share/bhyve

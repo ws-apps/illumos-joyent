@@ -5122,6 +5122,7 @@ h usr/lib/brand/bhyve/root/usr/sbin/zhyve=usr/sbin/amd64/bhyve
 d usr/lib/brand/bhyve/root/usr/share 0555 root sys
 d usr/lib/brand/bhyve/root/usr/share/bhyve 0555 root sys
 h usr/lib/brand/bhyve/root/usr/share/bhyve/BHYVE_UEFI.fd=usr/share/bhyve/BHYVE_UEFI.fd
+h usr/lib/brand/bhyve/root/usr/share/bhyve/BHYVE_UEFI_CSM.fd=usr/share/bhyve/BHYVE_UEFI_CSM.fd
 d usr/lib/brand/lx 0755 root bin
 s usr/lib/brand/lx/64=amd64
 d usr/lib/brand/lx/amd64 0755 root bin
@@ -10647,6 +10648,7 @@ d usr/sfw/bin/amd64 0755 root bin
 d usr/share 0755 root sys
 d usr/share/bhyve 0755 root sys
 f usr/share/bhyve/BHYVE_UEFI.fd 0444 root sys
+f usr/share/bhyve/BHYVE_UEFI_CSM.fd 0444 root sys
 d usr/share/hwdata 0755 root sys
 f usr/share/hwdata/pci.ids 0444 root bin
 d usr/share/lib 0755 root sys
