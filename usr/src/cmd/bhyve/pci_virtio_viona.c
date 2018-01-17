@@ -163,7 +163,7 @@ pci_viona_ring_reset(struct pci_viona_softc *sc, int ring)
 		error = ioctl(sc->vsc_vnafd, VNA_IOC_RING_RESET, ring);
 		if (error != 0) {
 			WPRINTF(("ioctl viona ring %u reset failed %d\n",
-			    ring, error));
+			    ring, errno));
 		} else {
 			sc->vsc_pfn[ring] = 0;
 		}
@@ -252,7 +252,7 @@ pci_viona_ring_init(struct pci_viona_softc *sc, uint64_t pfn)
 	error = ioctl(sc->vsc_vnafd, VNA_IOC_RING_INIT, &vna_ri);
 
 	if (error != 0) {
-		WPRINTF(("ioctl viona ring %u init failed %d\n", qnum, error));
+		WPRINTF(("ioctl viona ring %u init failed %d\n", qnum, errno));
 	}
 }
 
@@ -264,7 +264,7 @@ pci_viona_viona_init(struct vmctx *ctx, struct pci_viona_softc *sc)
 
 	sc->vsc_vnafd = open("/dev/viona/ctl", O_RDWR | O_EXCL);
 	if (sc->vsc_vnafd == -1) {
-		WPRINTF(("open viona ctl failed\n"));
+		WPRINTF(("open viona ctl failed: %d\n", errno));
 		return (-1);
 	}
 
@@ -273,7 +273,7 @@ pci_viona_viona_init(struct vmctx *ctx, struct pci_viona_softc *sc)
 	error = ioctl(sc->vsc_vnafd, VNA_IOC_CREATE, &vna_create);
 	if (error != 0) {
 		(void) close(sc->vsc_vnafd);
-		WPRINTF(("ioctl viona create failed %d\n", error));
+		WPRINTF(("ioctl viona create failed %d\n", errno));
 		return (-1);
 	}
 
@@ -587,7 +587,7 @@ pci_viona_qnotify(struct pci_viona_softc *sc, int ring)
 		error = ioctl(sc->vsc_vnafd, VNA_IOC_RING_KICK, ring);
 		if (error != 0) {
 			WPRINTF(("ioctl viona ring %d kick failed %d\n",
-			    ring, error));
+			    ring, errno));
 		}
 		break;
 	case VIONA_CTLQ:
@@ -633,7 +633,7 @@ pci_viona_write(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 		err = ioctl(sc->vsc_vnafd, VNA_IOC_SET_FEATURES, &value);
 		if (err != 0) {
 			WPRINTF(("ioctl feature negotiation returned"
-			    " err = %d\n", err));
+			    " err = %d\n", errno));
 		} else {
 			sc->vsc_features = value;
 		}
@@ -733,7 +733,7 @@ pci_viona_read(struct vmctx *ctx, int vcpu, struct pci_devinst *pi,
 		err = ioctl(sc->vsc_vnafd, VNA_IOC_GET_FEATURES, &value);
 		if (err != 0) {
 			WPRINTF(("ioctl get host features returned"
-			    " err = %d\n", err));
+			    " err = %d\n", errno));
 		}
 		value &= ~sc->vsc_feature_mask;
 		break;
