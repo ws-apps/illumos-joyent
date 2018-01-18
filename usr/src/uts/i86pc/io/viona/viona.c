@@ -1893,14 +1893,14 @@ viona_tx_csum(viona_link_t *link, const struct virtio_net_hdr *hdr,
 		return (B_FALSE);
 	}
 
-	ftype = eth->ether_type;
+	ftype = ntohs(eth->ether_type);
 	if (ftype == ETHERTYPE_VLAN) {
 		const struct ether_vlan_header *veth;
 
 		/* punt on QinQ for now */
 		eth_len = sizeof (struct ether_vlan_header);
 		veth = (const struct ether_vlan_header *)eth;
-		ftype = veth->ether_type;
+		ftype = ntohs(veth->ether_type);
 	}
 
 	/*
