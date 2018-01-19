@@ -5120,6 +5120,7 @@ f usr/lib/brand/bhyve/statechange 0555 root sys
 d usr/lib/brand/bhyve/root 0555 root sys
 d usr/lib/brand/bhyve/root/usr 0555 root sys
 d usr/lib/brand/bhyve/root/usr/sbin 0555 root sys
+h usr/lib/brand/bhyve/root/usr/sbin/iasl=usr/sbin/iasl
 h usr/lib/brand/bhyve/root/usr/sbin/zhyve=usr/sbin/amd64/bhyve
 d usr/lib/brand/bhyve/root/usr/share 0555 root sys
 d usr/lib/brand/bhyve/root/usr/share/bhyve 0555 root sys
