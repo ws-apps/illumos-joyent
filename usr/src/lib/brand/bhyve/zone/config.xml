@@ -27,7 +27,11 @@
 	<forcedlogin_cmd />
 	<user_cmd />
 
-	<install>/usr/lib/brand/bhyve/binstall -z %z -R %R</install>
+	<!-- XXX-mg
+	  Until we have better separation of concerns, bhyve brand will use the
+	  kvm installer, which is intertwined with vmadm.
+	-->
+	<install>/usr/lib/brand/kvm/kinstall -z %z -R %R</install>
 	<installopts>R:t:U:q:z:</installopts>
 	<boot>/usr/lib/brand/bhyve/boot %z %R</boot>
 	<halt />
