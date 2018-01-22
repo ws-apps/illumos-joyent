@@ -21,6 +21,7 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright (c) 2018, Joyent, Inc.
  */
 
 #include <pthread.h>
@@ -823,23 +824,23 @@ digest_done:
 
 cleanup:
 	if (A) {
-		bzero(A, Alen);
+		explicit_bzero(A, Alen);
 		free(A);
 	}
 	if (Ai) {
-		bzero(Ai, AiLen);
+		explicit_bzero(Ai, AiLen);
 		free(Ai);
 	}
 	if (B) {
-		bzero(B, Blen);
+		explicit_bzero(B, Blen);
 		free(B);
 	}
 	if (D) {
-		bzero(D, Dlen);
+		explicit_bzero(D, Dlen);
 		free(D);
 	}
 	if (I) {
-		bzero(I, Ilen);
+		explicit_bzero(I, Ilen);
 		free(I);
 	}
 	return (rv);
@@ -1400,6 +1401,8 @@ soft_generate_pkcs5_pbkdf2_key(soft_session_t *session_p,
 		keydata += hLen;
 	}
 	(void) soft_delete_object(session_p, hmac_key, B_FALSE, B_FALSE);
+	if (params->ulSaltSourceDataLen > 0)
+		explicit_bzero(salt, params->ulSaltSourceDataLen);
 	free(salt);
 
 	return (rv);
@@ -1535,13 +1538,13 @@ soft_wrapkey(soft_session_t *session_p, CK_MECHANISM_PTR pMechanism,
 cleanup_wrap:
 	if (padded_data != NULL && padded_len != plain_len) {
 		/* Clear buffer before returning to memory pool. */
-		(void) memset(padded_data, 0x0, padded_len);
+		explicit_bzero(padded_data, padded_len);
 		free(padded_data);
 	}
 
 	if ((hkey_p->class != CKO_SECRET_KEY) && (plain_data != NULL)) {
 		/* Clear buffer before returning to memory pool. */
-		(void) memset(plain_data, 0x0, plain_len);
+		explicit_bzero(plain_data, plain_len);
 		free(plain_data);
 	}
 
@@ -1822,7 +1825,7 @@ soft_unwrapkey(soft_session_t *session_p, CK_MECHANISM_PTR pMechanism,
 
 	if (new_objp->class != CKO_SECRET_KEY) {
 		/* Clear buffer before returning to memory pool. */
-		(void) memset(plain_data, 0x0, plain_len);
+		explicit_bzero(plain_data, plain_len);
 		free(plain_data);
 	}
 
@@ -1834,7 +1837,7 @@ cleanup_unwrap:
 	/* The decrypted private key buffer must be freed explicitly. */
 	if ((new_objp->class != CKO_SECRET_KEY) && (plain_data != NULL)) {
 		/* Clear buffer before returning to memory pool. */
-		(void) memset(plain_data, 0x0, plain_len);
+		explicit_bzero(plain_data, plain_len);
 		free(plain_data);
 	}
 

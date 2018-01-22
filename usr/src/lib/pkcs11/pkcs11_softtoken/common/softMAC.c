@@ -22,9 +22,8 @@
 /*
  * Copyright 2005 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright (c) 2018, Joyent, Inc.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <pthread.h>
 #include <sys/md5.h>
@@ -562,11 +561,13 @@ clean_exit:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 
 	if (sign_op) {
-		bzero(session_p->sign.context, sizeof (soft_hmac_ctx_t));
+		explicit_bzero(session_p->sign.context,
+		    sizeof (soft_hmac_ctx_t));
 		free(session_p->sign.context);
 		session_p->sign.context = NULL;
 	} else {
-		bzero(session_p->verify.context, sizeof (soft_hmac_ctx_t));
+		explicit_bzero(session_p->verify.context,
+		    sizeof (soft_hmac_ctx_t));
 		free(session_p->verify.context);
 		session_p->verify.context = NULL;
 	}

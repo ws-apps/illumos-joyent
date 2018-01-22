@@ -21,6 +21,7 @@
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright (c) 2018, Joyent, Inc.
  */
 
 #include <pthread.h>
@@ -298,12 +299,13 @@ cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	blowfish_ctx = (blowfish_ctx_t *)soft_blowfish_ctx->blowfish_cbc;
 	if (blowfish_ctx != NULL) {
-		bzero(blowfish_ctx->bc_keysched,
+		explicit_bzero(blowfish_ctx->bc_keysched,
 		    blowfish_ctx->bc_keysched_len);
 		free(soft_blowfish_ctx->blowfish_cbc);
 	}
 
-	bzero(soft_blowfish_ctx->key_sched, soft_blowfish_ctx->keysched_len);
+	explicit_bzero(soft_blowfish_ctx->key_sched,
+	    soft_blowfish_ctx->keysched_len);
 	free(soft_blowfish_ctx->key_sched);
 	free(session_p->encrypt.context);
 	session_p->encrypt.context = NULL;
@@ -466,12 +468,13 @@ cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	blowfish_ctx = (blowfish_ctx_t *)soft_blowfish_ctx->blowfish_cbc;
 	if (blowfish_ctx != NULL) {
-		bzero(blowfish_ctx->bc_keysched,
+		explicit_bzero(blowfish_ctx->bc_keysched,
 		    blowfish_ctx->bc_keysched_len);
 		free(soft_blowfish_ctx->blowfish_cbc);
 	}
 
-	bzero(soft_blowfish_ctx->key_sched, soft_blowfish_ctx->keysched_len);
+	explicit_bzero(soft_blowfish_ctx->key_sched,
+	    soft_blowfish_ctx->keysched_len);
 	free(soft_blowfish_ctx->key_sched);
 	free(session_p->decrypt.context);
 	session_p->decrypt.context = NULL;

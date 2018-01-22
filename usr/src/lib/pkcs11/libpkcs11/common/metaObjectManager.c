@@ -20,6 +20,7 @@
  */
 /*
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, Joyent, Inc.
  */
 
 
@@ -596,6 +597,8 @@ meta_object_dealloc(meta_session_t *session, meta_object_t *object,
 
 	if (object->clone_template) {
 		for (i = 0; i < object->clone_template_size; i++) {
+			explicit_bzero((object->clone_template)[i].pValue,
+			    (object->clone_template)[i].ulValueLen);
 			free(((object->clone_template)[i]).pValue);
 		}
 		free(object->clone_template);
@@ -859,6 +862,8 @@ finish:
 	if (attrs_with_val) {
 		for (i = 0; i < num_attrs; i++) {
 			if (attrs_with_val[i].pValue != NULL) {
+				explicit_bzero(attrs_with_val[i].pValue,
+				    attrs_with_val[i].ulValueLen);
 				free(attrs_with_val[i].pValue);
 			}
 		}
@@ -1491,6 +1496,7 @@ finish:
 	}
 
 	if (wrappedKey) {
+		explicit_bzero(wrappedKey, wrappedKeyLen);
 		free(wrappedKey);
 	}
 

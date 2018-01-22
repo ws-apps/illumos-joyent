@@ -22,9 +22,8 @@
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright (c) 2018, Joyent, Inc.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <pthread.h>
 #include <errno.h>
@@ -236,14 +235,16 @@ free_soft_ctx(void *s, int opflag)
 	if (opflag & OP_SIGN) {
 		if (session_p->sign.context == NULL)
 			return;
-		bzero(session_p->sign.context, sizeof (soft_hmac_ctx_t));
+		explicit_bzero(session_p->sign.context,
+		    sizeof (soft_hmac_ctx_t));
 		free(session_p->sign.context);
 		session_p->sign.context = NULL;
 		session_p->sign.flags = 0;
 	} else if (opflag & OP_VERIFY) {
 		if (session_p->verify.context == NULL)
 			return;
-		bzero(session_p->verify.context, sizeof (soft_hmac_ctx_t));
+		explicit_bzero(session_p->verify.context,
+		    sizeof (soft_hmac_ctx_t));
 		free(session_p->verify.context);
 		session_p->verify.context = NULL;
 		session_p->verify.flags = 0;

@@ -21,6 +21,7 @@
 
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2018, Joyent, Inc.
  */
 
 #include <pthread.h>
@@ -449,11 +450,11 @@ cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	des_ctx = (des_ctx_t *)soft_des_ctx->des_cbc;
 	if (des_ctx != NULL) {
-		bzero(des_ctx->dc_keysched, des_ctx->dc_keysched_len);
+		explicit_bzero(des_ctx->dc_keysched, des_ctx->dc_keysched_len);
 		free(soft_des_ctx->des_cbc);
 	}
 
-	bzero(soft_des_ctx->key_sched, soft_des_ctx->keysched_len);
+	explicit_bzero(soft_des_ctx->key_sched, soft_des_ctx->keysched_len);
 	free(soft_des_ctx->key_sched);
 	free(session_p->encrypt.context);
 	session_p->encrypt.context = NULL;
@@ -778,11 +779,11 @@ cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	des_ctx = (des_ctx_t *)soft_des_ctx->des_cbc;
 	if (des_ctx != NULL) {
-		bzero(des_ctx->dc_keysched, des_ctx->dc_keysched_len);
+		explicit_bzero(des_ctx->dc_keysched, des_ctx->dc_keysched_len);
 		free(soft_des_ctx->des_cbc);
 	}
 
-	bzero(soft_des_ctx->key_sched, soft_des_ctx->keysched_len);
+	explicit_bzero(soft_des_ctx->key_sched, soft_des_ctx->keysched_len);
 	free(soft_des_ctx->key_sched);
 	free(session_p->decrypt.context);
 	session_p->decrypt.context = NULL;

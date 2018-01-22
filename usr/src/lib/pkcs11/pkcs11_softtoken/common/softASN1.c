@@ -22,6 +22,7 @@
 /*
  * Copyright (c) 2004, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2012 Milan Jurik. All rights reserved.
+ * Copyright (c) 2018, Joyent. Inc.
  */
 
 #include <stdlib.h>
@@ -87,7 +88,7 @@ pad_bigint_attr(biginteger_t *src, biginteger_t *dst)
 	 * clear out potentially sensitive data before that happens.
 	 */
 	if (dst->big_value != NULL)
-		(void) memset(dst->big_value, 0x0, dst->big_value_len);
+		explicit_bzero(dst->big_value, dst->big_value_len);
 
 	padding = (src->big_value[0] < 0x80) ? 0 : 1;
 	dst->big_value_len = src->big_value_len + padding;
@@ -339,7 +340,7 @@ rsa_pri_to_asn1(soft_object_t *objp, uchar_t *buf, ulong_t *buf_len)
 cleanup_rsapri2asn:
 
 	if (tmp_pad.big_value != NULL) {
-		(void) memset(tmp_pad.big_value, 0x0, tmp_pad.big_value_len);
+		explicit_bzero(tmp_pad.big_value, tmp_pad.big_value_len);
 		free(tmp_pad.big_value);
 	}
 
@@ -528,7 +529,7 @@ dsa_pri_to_asn1(soft_object_t *objp, uchar_t *buf, ulong_t *buf_len)
 cleanup_dsapri2asn:
 
 	if (tmp_pad.big_value != NULL) {
-		(void) memset(tmp_pad.big_value, 0x0, tmp_pad.big_value_len);
+		explicit_bzero(tmp_pad.big_value, tmp_pad.big_value_len);
 		free(tmp_pad.big_value);
 	}
 
@@ -702,7 +703,7 @@ dh_pri_to_asn1(soft_object_t *objp, uchar_t *buf, ulong_t *buf_len)
 cleanup_dhpri2asn:
 
 	if (tmp_pad.big_value != NULL) {
-		(void) memset(tmp_pad.big_value, 0x0, tmp_pad.big_value_len);
+		explicit_bzero(tmp_pad.big_value, tmp_pad.big_value_len);
 		free(tmp_pad.big_value);
 	}
 
@@ -894,7 +895,7 @@ x942_dh_pri_to_asn1(soft_object_t *objp, uchar_t *buf, ulong_t *buf_len)
 cleanup_x942dhpri2asn:
 
 	if (tmp_pad.big_value != NULL) {
-		(void) memset(tmp_pad.big_value, 0x0, tmp_pad.big_value_len);
+		explicit_bzero(tmp_pad.big_value, tmp_pad.big_value_len);
 		free(tmp_pad.big_value);
 	}
 
@@ -1241,8 +1242,7 @@ error_asn2rsapri:
 cleanup_asn2rsapri:
 
 	if (tmp_nopad.big_value != NULL) {
-		(void) memset(tmp_nopad.big_value, 0x0,
-		    tmp_nopad.big_value_len);
+		explicit_bzero(tmp_nopad.big_value, tmp_nopad.big_value_len);
 		free(tmp_nopad.big_value);
 	}
 
@@ -1449,8 +1449,7 @@ error_asn2dsapri:
 cleanup_asn2dsapri:
 
 	if (tmp_nopad.big_value != NULL) {
-		(void) memset(tmp_nopad.big_value, 0x0,
-		    tmp_nopad.big_value_len);
+		explicit_bzero(tmp_nopad.big_value, tmp_nopad.big_value_len);
 		free(tmp_nopad.big_value);
 	}
 
@@ -1633,8 +1632,7 @@ error_asn2dhpri:
 cleanup_asn2dhpri:
 
 	if (tmp_nopad.big_value != NULL) {
-		(void) memset(tmp_nopad.big_value, 0x0,
-		    tmp_nopad.big_value_len);
+		explicit_bzero(tmp_nopad.big_value, tmp_nopad.big_value_len);
 		free(tmp_nopad.big_value);
 	}
 
@@ -1841,8 +1839,7 @@ error_asn2x942dhpri:
 cleanup_asn2x942dhpri:
 
 	if (tmp_nopad.big_value != NULL) {
-		(void) memset(tmp_nopad.big_value, 0x0,
-		    tmp_nopad.big_value_len);
+		explicit_bzero(tmp_nopad.big_value, tmp_nopad.big_value_len);
 		free(tmp_nopad.big_value);
 	}
 
@@ -1864,7 +1861,7 @@ cleanup_asn2x942dhpri:
 CK_RV
 soft_asn1_to_object(soft_object_t *objp, uchar_t *buf, ulong_t buf_len)
 {
-	CK_RV 		rv = CKR_OK;
+	CK_RV		rv = CKR_OK;
 	CK_OBJECT_CLASS class = objp->class;
 	CK_KEY_TYPE	keytype = objp->key_type;
 	private_key_obj_t *pvk;

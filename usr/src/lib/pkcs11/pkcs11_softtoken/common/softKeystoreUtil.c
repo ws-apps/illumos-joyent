@@ -470,8 +470,10 @@ create_keystore()
 	(void) lock_file(fd, B_FALSE, B_FALSE);
 
 	(void) close(fd);
-	if (hashed_pin_salt)
+	if (hashed_pin_salt) {
+		explicit_bzero(hashed_pin_salt, hashed_pin_salt_len);
 		free(hashed_pin_salt);
+	}
 	return (0);
 
 cleanup:
@@ -892,6 +894,7 @@ get_hashed_pin(int fd, char **hashed_pin)
 
 	if ((readn_nointr(fd, *hashed_pin, hashed_pin_size))
 	    != (ssize_t)hashed_pin_size) {
+		explicit_bzero(*hashed_pin, hashed_pin_size + 1);
 		free(*hashed_pin);
 		*hashed_pin = NULL;
 		return (CKR_FUNCTION_FAILED);
@@ -1320,58 +1323,70 @@ reencrypt_obj(soft_object_t *new_enc_key, soft_object_t *new_hmac_key,
 	decrypted_len = 0;
 	if (soft_keystore_crypt(enc_key, old_iv, B_FALSE, buf, nread,
 	    NULL, &decrypted_len) != CKR_OK) {
+		explicit_bzero(buf, nread);
 		free(buf);
 		goto cleanup;
 	}
 
 	decrypted_buf = malloc(decrypted_len);
 	if (decrypted_buf == NULL) {
+		explicit_bzero(buf, nread);
 		free(buf);
 		goto cleanup;
 	}
 
 	if (soft_keystore_crypt(enc_key, old_iv, B_FALSE, buf, nread,
 	    decrypted_buf, &decrypted_len) != CKR_OK) {
+		explicit_bzero(buf, nread);
+		explicit_bzero(decrypted_buf, decrypted_len);
 		free(buf);
 		free(decrypted_buf);
 		goto cleanup;
 	}
 
+	explicit_bzero(buf, nread);
 	free(buf);
 
 	/* re-encrypt with new key */
 	encrypted_len = 0;
 	if (soft_keystore_crypt(new_enc_key, iv, B_TRUE, decrypted_buf,
 	    decrypted_len, NULL, &encrypted_len) != CKR_OK) {
+		explicit_bzero(decrypted_buf, decrypted_len);
 		free(decrypted_buf);
 		goto cleanup;
 	}
 
 	buf = malloc(encrypted_len);
 	if (buf == NULL) {
+		explicit_bzero(decrypted_buf, decrypted_len);
 		free(decrypted_buf);
 		goto cleanup;
 	}
 
 	if (soft_keystore_crypt(new_enc_key, iv, B_TRUE, decrypted_buf,
 	    decrypted_len, buf, &encrypted_len) != CKR_OK) {
+		explicit_bzero(buf, encrypted_len);
+		explicit_bzero(decrypted_buf, decrypted_len);
 		free(buf);
 		free(decrypted_buf);
 		goto cleanup;
 	}
 
+	explicit_bzero(decrypted_buf, decrypted_len);
 	free(decrypted_buf);
 
 	/* calculate hmac on re-encrypted data using new hmac key */
 	hmac_len = OBJ_HMAC_SIZE;
 	if (soft_keystore_hmac(new_hmac_key, B_TRUE, buf,
 	    encrypted_len, hmac, &hmac_len) != CKR_OK) {
+		explicit_bzero(buf, encrypted_len);
 		free(buf);
 		goto cleanup;
 	}
 
 	/* just for sanity check */
 	if (hmac_len != OBJ_HMAC_SIZE) {
+		explicit_bzero(buf, encrypted_len);
 		free(buf);
 		goto cleanup;
 	}
@@ -1379,6 +1394,7 @@ reencrypt_obj(soft_object_t *new_enc_key, soft_object_t *new_hmac_key,
 	/* write new hmac */
 	if (writen_nointr(new_fd, (char *)hmac, OBJ_HMAC_SIZE)
 	    != OBJ_HMAC_SIZE) {
+		explicit_bzero(buf, encrypted_len);
 		free(buf);
 		goto cleanup;
 	}
@@ -1386,9 +1402,11 @@ reencrypt_obj(soft_object_t *new_enc_key, soft_object_t *new_hmac_key,
 	/* write re-encrypted buffer to temp file */
 	if (writen_nointr(new_fd, (void *)buf, encrypted_len)
 	    != encrypted_len) {
+		explicit_bzero(buf, encrypted_len);
 		free(buf);
 		goto cleanup;
 	}
+	explicit_bzero(buf, encrypted_len);
 	free(buf);
 	ret_val = 0;
 
@@ -1547,10 +1565,12 @@ soft_keystore_setpin(uchar_t *oldpin, uchar_t *newpin, boolean_t lock_held)
 		}
 		if (writen_nointr(tmp_ks_fd, (void *)new_crypt_salt,
 		    KS_KEY_SALT_SIZE) != KS_KEY_SALT_SIZE) {
+			explicit_bzero(new_crypt_salt, KS_KEY_SALT_SIZE);
 			free(new_crypt_salt);
 			(void) soft_cleanup_object(new_crypt_key);
 			goto cleanup;
 		}
+		explicit_bzero(new_crypt_salt, KS_KEY_SALT_SIZE);
 		free(new_crypt_salt);
 
 		if (soft_gen_hmac_key(newpin, &new_hmac_key, &new_hmac_salt)
@@ -1560,9 +1580,11 @@ soft_keystore_setpin(uchar_t *oldpin, uchar_t *newpin, boolean_t lock_held)
 		}
 		if (writen_nointr(tmp_ks_fd, (void *)new_hmac_salt,
 		    KS_HMAC_SALT_SIZE) != KS_HMAC_SALT_SIZE) {
+			explicit_bzero(new_hmac_salt, KS_HMAC_SALT_SIZE);
 			free(new_hmac_salt);
 			goto cleanup3;
 		}
+		explicit_bzero(new_hmac_salt, KS_HMAC_SALT_SIZE);
 		free(new_hmac_salt);
 	} else {
 		if (soft_gen_crypt_key(newpin, &new_crypt_key,
@@ -1612,12 +1634,14 @@ soft_keystore_setpin(uchar_t *oldpin, uchar_t *newpin, boolean_t lock_held)
 
 	if ((readn_nointr(fd, hashed_pin_salt, hashed_pin_salt_length)) !=
 	    (ssize_t)hashed_pin_salt_length) {
+		explicit_bzero(hashed_pin_salt, hashed_pin_salt_length + 1);
 		free(hashed_pin_salt);
 		goto cleanup3;
 	}
 
 	if ((writen_nointr(tmp_ks_fd, hashed_pin_salt, hashed_pin_salt_length))
 	    != (ssize_t)hashed_pin_salt_length) {
+		explicit_bzero(hashed_pin_salt, hashed_pin_salt_length + 1);
 		free(hashed_pin_salt);
 		goto cleanup3;
 	}
@@ -1627,10 +1651,12 @@ soft_keystore_setpin(uchar_t *oldpin, uchar_t *newpin, boolean_t lock_held)
 	/* old hashed pin length and value can be ignored, generate new one */
 	if (soft_gen_hashed_pin(newpin, &new_hashed_pin,
 	    &hashed_pin_salt) < 0) {
+		explicit_bzero(hashed_pin_salt, hashed_pin_salt_length + 1);
 		free(hashed_pin_salt);
 		goto cleanup3;
 	}
 
+	explicit_bzero(hashed_pin_salt, hashed_pin_salt_length + 1);
 	free(hashed_pin_salt);
 
 	if (new_hashed_pin == NULL) {
@@ -1764,9 +1790,11 @@ cleanup:
 		}
 	}
 	if (crypt_salt != NULL) {
+		explicit_bzero(crypt_salt, KS_KEY_SALT_SIZE);
 		free(crypt_salt);
 	}
 	if (hmac_salt != NULL) {
+		explicit_bzero(hmac_salt, KS_HMAC_SALT_SIZE);
 		free(hmac_salt);
 	}
 	(void) close(fd);
@@ -1856,16 +1884,18 @@ cleanup:
 	(void) lock_file(fd, B_TRUE, B_FALSE);
 	(void) close(fd);
 	if (crypt_salt != NULL) {
+		explicit_bzero(crypt_salt, KS_KEY_SALT_SIZE);
 		free(crypt_salt);
 	}
 	if (hmac_salt != NULL) {
+		explicit_bzero(hmac_salt, KS_HMAC_SALT_SIZE);
 		free(hmac_salt);
 	}
 	return (ret_val);
 }
 
 /*
- * 	FUNCTION: soft_keystore_get_objs
+ *	FUNCTION: soft_keystore_get_objs
  *
  *	ARGUMENTS:
  *
@@ -1980,6 +2010,7 @@ cleanup:
 	tmp = *result_obj_list;
 	while (tmp) {
 		*result_obj_list = tmp->next;
+		explicit_bzero(tmp->buf, tmp->size);
 		free(tmp->buf);
 		free(tmp);
 		tmp = *result_obj_list;
@@ -2087,6 +2118,7 @@ soft_keystore_get_single_obj(ks_obj_handle_t *ks_handle,
 		hmac_size = OBJ_HMAC_SIZE;
 		if (soft_keystore_hmac(hmac_key, B_FALSE, buf,
 		    nread, obj_hmac, &hmac_size) != CKR_OK) {
+			explicit_bzero(buf, nread);
 			free(buf);
 			rv = CKR_FUNCTION_FAILED;
 			goto cleanup;
@@ -2095,6 +2127,7 @@ soft_keystore_get_single_obj(ks_obj_handle_t *ks_handle,
 		/* decrypt object */
 		if (soft_keystore_crypt(enc_key, iv, B_FALSE, buf, nread,
 		    NULL, &out_len) != CKR_OK) {
+			explicit_bzero(buf, nread);
 			free(buf);
 			rv = CKR_FUNCTION_FAILED;
 			goto cleanup;
@@ -2102,6 +2135,7 @@ soft_keystore_get_single_obj(ks_obj_handle_t *ks_handle,
 
 		decrypted_buf = malloc(sizeof (uchar_t) * out_len);
 		if (decrypted_buf == NULL) {
+			explicit_bzero(buf, nread);
 			free(buf);
 			rv = CKR_HOST_MEMORY;
 			goto cleanup;
@@ -2109,6 +2143,8 @@ soft_keystore_get_single_obj(ks_obj_handle_t *ks_handle,
 
 		if (soft_keystore_crypt(enc_key, iv, B_FALSE, buf, nread,
 		    decrypted_buf, &out_len) != CKR_OK) {
+			explicit_bzero(buf, nread);
+			explicit_bzero(decrypted_buf, out_len);
 			free(decrypted_buf);
 			free(buf);
 			rv = CKR_FUNCTION_FAILED;
@@ -2126,12 +2162,16 @@ soft_keystore_get_single_obj(ks_obj_handle_t *ks_handle,
 		 */
 		obj->buf = malloc(sizeof (uchar_t) * (out_len - MAXPATHLEN));
 		if (obj->buf == NULL) {
+			explicit_bzero(buf, nread);
+			explicit_bzero(decrypted_buf, out_len);
 			free(decrypted_buf);
 			free(buf);
 			rv = CKR_HOST_MEMORY;
 			goto cleanup;
 		}
 		(void) memcpy(obj->buf, decrypted_buf + MAXPATHLEN, obj->size);
+		explicit_bzero(buf, nread);
+		explicit_bzero(decrypted_buf, out_len);
 		free(decrypted_buf);
 		free(buf);
 		*return_obj = obj;
@@ -2155,7 +2195,7 @@ cleanup:
 
 
 /*
- * 	FUNCTION: soft_keystore_put_new_obj
+ *	FUNCTION: soft_keystore_put_new_obj
  *
  *	ARGUMENTS:
  *		buf: buffer containing un-encrypted data
@@ -2336,12 +2376,14 @@ soft_keystore_put_new_obj(uchar_t *buf, size_t len, boolean_t public,
 		if (soft_keystore_crypt(enc_key, iv,
 		    B_TRUE, prepared_buf, prepared_len,
 		    NULL, &out_len) != CKR_OK) {
+			explicit_bzero(prepared_buf, prepared_len);
 			free(prepared_buf);
 			goto cleanup2;
 		}
 
 		encrypted_buf = malloc(out_len * sizeof (char));
 		if (encrypted_buf == NULL) {
+			explicit_bzero(prepared_buf, prepared_len);
 			free(prepared_buf);
 			goto cleanup2;
 		}
@@ -2349,21 +2391,26 @@ soft_keystore_put_new_obj(uchar_t *buf, size_t len, boolean_t public,
 		if (soft_keystore_crypt(enc_key, iv,
 		    B_TRUE, prepared_buf, prepared_len,
 		    encrypted_buf, &out_len) != CKR_OK) {
+			explicit_bzero(encrypted_buf, out_len);
+			explicit_bzero(prepared_buf, prepared_len);
 			free(encrypted_buf);
 			free(prepared_buf);
 			goto cleanup2;
 		}
+		explicit_bzero(prepared_buf, prepared_len);
 		free(prepared_buf);
 
 		/* calculate HMAC of encrypted object */
 		hmac_size = OBJ_HMAC_SIZE;
 		if (soft_keystore_hmac(hmac_key, B_TRUE, encrypted_buf,
 		    out_len, obj_hmac, &hmac_size) != CKR_OK) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
 
 		if (hmac_size != OBJ_HMAC_SIZE) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
@@ -2371,6 +2418,7 @@ soft_keystore_put_new_obj(uchar_t *buf, size_t len, boolean_t public,
 		/* write hmac */
 		if (writen_nointr(obj_fd, (void *)obj_hmac,
 		    sizeof (obj_hmac)) != sizeof (obj_hmac)) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
@@ -2378,10 +2426,12 @@ soft_keystore_put_new_obj(uchar_t *buf, size_t len, boolean_t public,
 		/* write encrypted object */
 		if (writen_nointr(obj_fd, (void *)encrypted_buf, out_len)
 		    != out_len) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
 
+		explicit_bzero(encrypted_buf, out_len);
 		free(encrypted_buf);
 	}
 
@@ -2421,6 +2471,8 @@ soft_keystore_put_new_obj(uchar_t *buf, size_t len, boolean_t public,
 		}
 	}
 	(void) close(fd);
+	explicit_bzero(obj_hmac, sizeof (obj_hmac));
+	explicit_bzero(iv, sizeof (iv));
 	return (0);
 
 cleanup2:
@@ -2438,6 +2490,8 @@ cleanup:
 	}
 
 	(void) close(fd);
+	explicit_bzero(obj_hmac, sizeof (obj_hmac));
+	explicit_bzero(iv, sizeof (iv));
 	return (-1);
 }
 
@@ -2591,43 +2645,52 @@ soft_keystore_modify_obj(ks_obj_handle_t *ks_handle, uchar_t *buf,
 
 		encrypted_buf = malloc(out_len * sizeof (char));
 		if (encrypted_buf == NULL) {
+			explicit_bzero(prepared_buf, prepared_len);
 			free(prepared_buf);
 			goto cleanup2;
 		}
 
 		if (soft_keystore_crypt(enc_key, iv, B_TRUE, prepared_buf,
 		    prepared_len, encrypted_buf, &out_len) != CKR_OK) {
+			explicit_bzero(prepared_buf, prepared_len);
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			free(prepared_buf);
 			goto cleanup2;
 		}
 
+		explicit_bzero(prepared_buf, prepared_len);
 		free(prepared_buf);
 
 		/* calculate hmac on encrypted buf */
 		hmac_size = OBJ_HMAC_SIZE;
 		if (soft_keystore_hmac(hmac_key, B_TRUE, encrypted_buf,
 		    out_len, obj_hmac, &hmac_size) != CKR_OK) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
 
 		if (hmac_size != OBJ_HMAC_SIZE) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
 
 		if (writen_nointr(tmp_fd, (char *)obj_hmac, OBJ_HMAC_SIZE)
 		    != OBJ_HMAC_SIZE) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
 
 		if (writen_nointr(tmp_fd, (void *)encrypted_buf, out_len)
 		    != out_len) {
+			explicit_bzero(encrypted_buf, out_len);
 			free(encrypted_buf);
 			goto cleanup2;
 		}
+		explicit_bzero(encrypted_buf, out_len);
 		free(encrypted_buf);
 	}
 	(void) close(tmp_fd);
@@ -2665,6 +2728,8 @@ soft_keystore_modify_obj(ks_obj_handle_t *ks_handle, uchar_t *buf,
 
 	(void) close(fd);
 
+	explicit_bzero(iv, sizeof (iv));
+	explicit_bzero(obj_hmac, sizeof (obj_hmac));
 	return (0); /* All operations completed successfully */
 
 cleanup2:
@@ -2679,6 +2744,8 @@ cleanup:
 	(void) lock_file(ks_fd, B_FALSE, B_FALSE);
 	(void) close(ks_fd);
 	(void) remove(tmp_ks_name);
+	explicit_bzero(iv, sizeof (iv));
+	explicit_bzero(obj_hmac, sizeof (obj_hmac));
 	return (-1);
 }
 
@@ -2803,6 +2870,7 @@ soft_keystore_get_pin_salt(char **salt)
 
 	if ((readn_nointr(fd, *salt, hashed_pin_salt_size))
 	    != (ssize_t)hashed_pin_salt_size) {
+		explicit_bzero(*salt, hashed_pin_salt_size + 1);
 		free(*salt);
 		goto cleanup;
 	}
