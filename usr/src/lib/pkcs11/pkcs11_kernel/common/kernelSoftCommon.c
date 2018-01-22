@@ -22,9 +22,8 @@
 /*
  * Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright (c) 2018, Joyent, Inc.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <pthread.h>
 #include <errno.h>
@@ -33,6 +32,7 @@
 #include <sys/crypto/ioctl.h>
 #include <security/cryptoki.h>
 #include <security/pkcs11t.h>
+#include <cryptoutil.h>
 #include "softSession.h"
 #include "softObject.h"
 #include "softOps.h"
@@ -234,18 +234,12 @@ free_soft_ctx(void *s, int opflag)
 		return;
 
 	if (opflag & OP_SIGN) {
-		if (session_p->sign.context == NULL)
-			return;
-		bzero(session_p->sign.context, sizeof (soft_hmac_ctx_t));
-		free(session_p->sign.context);
-		session_p->sign.context = NULL;
+		cryptodestroy(&session_p->sign.context,
+		    sizeof (soft_hmac_ctx_t));
 		session_p->sign.flags = 0;
 	} else if (opflag & OP_VERIFY) {
-		if (session_p->verify.context == NULL)
-			return;
-		bzero(session_p->verify.context, sizeof (soft_hmac_ctx_t));
-		free(session_p->verify.context);
-		session_p->verify.context = NULL;
+		cryptodestroy(&session_p->verify.context,
+		    sizeof (soft_hmac_ctx_t));
 		session_p->verify.flags = 0;
 	} else {
 		if (session_p->digest.context == NULL)

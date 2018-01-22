@@ -21,6 +21,7 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2018, Joyent, Inc.
  */
 
 #include <strings.h>
@@ -28,6 +29,7 @@
 #include <ecc_impl.h>
 #include <security/cryptoki.h>
 #include <sys/crypto/ioctl.h>
+#include <cryptoutil.h>
 #include "kernelGlobal.h"
 #include "kernelSession.h"
 #include "kernelObject.h"
@@ -343,20 +345,16 @@ key_gen_by_value(CK_MECHANISM_PTR pMechanism, CK_ATTRIBUTE_PTR pTemplate,
 	}
 	new_objp->is_lib_obj = B_TRUE;
 	new_objp->session_handle = (CK_SESSION_HANDLE)session_p;
-	(void) free(newTemplate);
-	bzero(key_buf, key_len);
-	(void) free(key_buf);
+	free(newTemplate);
+	cryptodestroy((void **)&key_buf, key_len);
 	return (CKR_OK);
 
 failed_exit:
 	free_attributes(obj_ngk.ngk_in_attributes, &obj_ngk.ngk_in_count);
 	free_attributes(obj_ngk.ngk_out_attributes, &obj_ngk.ngk_out_count);
-	if (key_buf != NULL) {
-		bzero(key_buf, key_len);
-		(void) free(key_buf);
-	}
+	cryptodestroy((void **)&key_buf, key_len);
 	if (newTemplate != NULL) {
-		(void) free(newTemplate);
+		free(newTemplate);
 	}
 	return (rv);
 }

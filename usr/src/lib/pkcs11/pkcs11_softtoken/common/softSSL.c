@@ -21,6 +21,7 @@
 /*
  * Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2018, Joyent, Inc.
  */
 
 #include <fcntl.h>
@@ -31,6 +32,7 @@
 #include <sys/md5.h>
 #include <sys/sysmacros.h>
 #include <security/cryptoki.h>
+#include <cryptoutil.h>
 #include "softGlobal.h"
 #include "softKeys.h"
 #include "softKeystore.h"
@@ -925,8 +927,9 @@ soft_ssl_key_and_mac_derive(soft_session_t *sp, CK_MECHANISM_PTR mech,
 	if (new_tmpl_allocated)
 		free(new_tmpl);
 
-	if (export_keys != NULL)
-		free(export_keys);
+	if (export_keys != NULL) {
+		cryptodestroy((void **)&export_keys, 2 * MD5_HASH_SIZE);
+	}
 
 	return (rv);
 
@@ -955,8 +958,9 @@ out_err:
 	if (new_tmpl_allocated)
 		free(new_tmpl);
 
-	if (export_keys != NULL)
-		free(export_keys);
+	if (export_keys != NULL) {
+		cryptodestroy((void **)&export_keys, 2 * MD5_HASH_SIZE);
+	}
 
 	return (rv);
 }

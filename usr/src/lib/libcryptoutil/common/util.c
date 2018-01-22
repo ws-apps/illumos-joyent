@@ -21,13 +21,13 @@
 /*
  * Copyright 2006 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright 2018, Joyent, Inc.
  */
-
-#pragma ident	"%Z%%M%	%I%	%E% SMI"
 
 #include <cryptoutil.h>
 #include <strings.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <tzfile.h>
 
 /*
@@ -113,4 +113,16 @@ str2lifetime(char *ltimestr, uint32_t *ltime)
 	}
 
 	return (0);
+}
+
+/* Clear and release memory, and remove ref */
+void
+cryptodestroy(void **ptr, size_t len)
+{
+	if (ptr == NULL || *ptr == NULL)
+		return;
+
+	explicit_bzero(*ptr, len);
+	free(*ptr);
+	*ptr = NULL;
 }

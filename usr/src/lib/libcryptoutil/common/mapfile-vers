@@ -43,6 +43,7 @@ SYMBOL_VERSION SUNWprivate {
 	create_umech;
 	cryptodebug;
 	cryptodebug_init;
+	cryptodestroy;
 	cryptoerror;
 	cryptoerror_off;
 	cryptoerror_on;

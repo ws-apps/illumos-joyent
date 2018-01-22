@@ -21,6 +21,7 @@
 
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
+ * Copyright 2018, Joyent, Inc.
  */
 
 #include <strings.h>
@@ -28,6 +29,7 @@
 #include <security/cryptoki.h>
 #include <sys/crypto/common.h>
 #include <arcfour.h>
+#include <cryptoutil.h>
 #include "softGlobal.h"
 #include "softSession.h"
 #include <aes_impl.h>
@@ -337,8 +339,11 @@ C_GetTokenInfo(CK_SLOT_ID slotID, CK_TOKEN_INFO_PTR pInfo)
 			pInfo->flags |= CKF_USER_PIN_TO_BE_CHANGED;
 	}
 
-	if (ks_cryptpin)
-		free(ks_cryptpin);
+	if (ks_cryptpin != NULL) {
+		size_t cplen = strlen(ks_cryptpin) + 1;
+
+		cryptodestroy((void **)&ks_cryptpin, cplen);
+	}
 
 	/* Provide information about a token in the provided buffer */
 	(void) strncpy((char *)pInfo->label, SOFT_TOKEN_LABEL, 32);

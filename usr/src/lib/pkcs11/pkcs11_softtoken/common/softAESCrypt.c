@@ -22,6 +22,7 @@
 /*
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2014 Nexenta Systems, Inc.  All rights reserved.
+ * Copyright (c) 2018, Joyent, Inc.
  */
 
 #include <pthread.h>
@@ -31,6 +32,7 @@
 #include <sys/types.h>
 #include <security/cryptoki.h>
 #include <aes_impl.h>
+#include <cryptoutil.h>
 #include "softSession.h"
 #include "softObject.h"
 #include "softCrypt.h"
@@ -488,15 +490,9 @@ encrypt_failed:
 cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	aes_ctx = (aes_ctx_t *)soft_aes_ctx->aes_cbc;
-	if (aes_ctx != NULL) {
-		bzero(aes_ctx->ac_keysched, aes_ctx->ac_keysched_len);
-		free(soft_aes_ctx->aes_cbc);
-	}
-
-	bzero(soft_aes_ctx->key_sched, soft_aes_ctx->keysched_len);
-	free(soft_aes_ctx->key_sched);
-	free(session_p->encrypt.context);
-	session_p->encrypt.context = NULL;
+	free(aes_ctx);
+	cryptodestroy(&soft_aes_ctx->key_sched, soft_aes_ctx->keysched_len);
+	cryptodestroy(&session_p->encrypt.context, sizeof (soft_aes_ctx_t));
 	(void) pthread_mutex_unlock(&session_p->session_mutex);
 
 	return (rv);
@@ -851,15 +847,9 @@ decrypt_failed:
 cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	aes_ctx = (aes_ctx_t *)soft_aes_ctx->aes_cbc;
-	if (aes_ctx != NULL) {
-		bzero(aes_ctx->ac_keysched, aes_ctx->ac_keysched_len);
-		free(soft_aes_ctx->aes_cbc);
-	}
-
-	bzero(soft_aes_ctx->key_sched, soft_aes_ctx->keysched_len);
-	free(soft_aes_ctx->key_sched);
-	free(session_p->decrypt.context);
-	session_p->decrypt.context = NULL;
+	free(aes_ctx);
+	cryptodestroy(&soft_aes_ctx->key_sched, soft_aes_ctx->keysched_len);
+	cryptodestroy(&session_p->decrypt.context, sizeof (soft_aes_ctx_t));
 	(void) pthread_mutex_unlock(&session_p->session_mutex);
 
 	return (rv);

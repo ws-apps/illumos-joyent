@@ -21,6 +21,7 @@
 /*
  * Copyright 2008 Sun Microsystems, Inc.  All rights reserved.
  * Use is subject to license terms.
+ * Copyright (c) 2018, Joyent, Inc.
  */
 
 #include <pthread.h>
@@ -29,6 +30,7 @@
 #include <strings.h>
 #include <sys/types.h>
 #include <security/cryptoki.h>
+#include <cryptoutil.h>
 #include "softSession.h"
 #include "softObject.h"
 #include "softCrypt.h"
@@ -297,16 +299,11 @@ soft_blowfish_encrypt_common(soft_session_t *session_p, CK_BYTE_PTR pData,
 cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	blowfish_ctx = (blowfish_ctx_t *)soft_blowfish_ctx->blowfish_cbc;
-	if (blowfish_ctx != NULL) {
-		bzero(blowfish_ctx->bc_keysched,
-		    blowfish_ctx->bc_keysched_len);
-		free(soft_blowfish_ctx->blowfish_cbc);
-	}
-
-	bzero(soft_blowfish_ctx->key_sched, soft_blowfish_ctx->keysched_len);
-	free(soft_blowfish_ctx->key_sched);
-	free(session_p->encrypt.context);
-	session_p->encrypt.context = NULL;
+	free(blowfish_ctx);
+	cryptodestroy(&soft_blowfish_ctx->key_sched,
+	    soft_blowfish_ctx->keysched_len);
+	cryptodestroy(&session_p->encrypt.context,
+	    sizeof (soft_blowfish_ctx_t));
 	(void) pthread_mutex_unlock(&session_p->session_mutex);
 
 	return (rv);
@@ -465,16 +462,11 @@ soft_blowfish_decrypt_common(soft_session_t *session_p, CK_BYTE_PTR pEncrypted,
 cleanup:
 	(void) pthread_mutex_lock(&session_p->session_mutex);
 	blowfish_ctx = (blowfish_ctx_t *)soft_blowfish_ctx->blowfish_cbc;
-	if (blowfish_ctx != NULL) {
-		bzero(blowfish_ctx->bc_keysched,
-		    blowfish_ctx->bc_keysched_len);
-		free(soft_blowfish_ctx->blowfish_cbc);
-	}
-
-	bzero(soft_blowfish_ctx->key_sched, soft_blowfish_ctx->keysched_len);
-	free(soft_blowfish_ctx->key_sched);
-	free(session_p->decrypt.context);
-	session_p->decrypt.context = NULL;
+	free(blowfish_ctx);
+	cryptodestroy(&soft_blowfish_ctx->key_sched,
+	    soft_blowfish_ctx->keysched_len);
+	cryptodestroy(&session_p->decrypt.context,
+	    sizeof (soft_blowfish_ctx_t));
 	(void) pthread_mutex_unlock(&session_p->session_mutex);
 
 	return (rv);

@@ -23,6 +23,7 @@
 /*
  * Copyright 2010 Nexenta Systems, Inc.  All rights reserved.
  * Copyright 2014, OmniTI Computer Consulting, Inc. All rights reserved.
+ * Copyright 2018, Joyent, Inc.
  */
 
 #ifndef _CRYPTOUTIL_H
@@ -226,6 +227,8 @@ extern int update_conf(char *conf_file, char *entry);
 
 extern int pkcs11_parse_uri(const char *str, pkcs11_uri_t *uri);
 extern void pkcs11_free_uri(pkcs11_uri_t *uri);
+
+extern void cryptodestroy(void **, size_t);
 
 #ifdef __cplusplus
 }
