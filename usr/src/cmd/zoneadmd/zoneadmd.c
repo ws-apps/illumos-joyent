@@ -820,10 +820,14 @@ setup_subproc_env(boolean_t debug)
 	struct zone_attrtab atab;
 	char net_resources[MAXNAMELEN * 2];
 	char dev_resources[MAXNAMELEN * 2];
+	char vmname[32];			/* VM_MAX_NAMELEN */
 
 	/* snap_hndl is null when called through the set_brand_env code path */
 	if (snap_hndl == NULL)
 		return (Z_OK);
+
+	(void) snprintf(vmname, sizeof (vmname), "SYSbhyve-%d", zone_did);
+	(void) setenv("_ZONECFG_vmname", vmname, 1);
 
 	net_resources[0] = '\0';
 	if ((res = zonecfg_setnwifent(snap_hndl)) != Z_OK)

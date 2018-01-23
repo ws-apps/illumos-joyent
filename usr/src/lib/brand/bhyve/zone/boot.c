@@ -14,35 +14,9 @@
  */
 
 /*
- * This program runs as a child of zoneadmd.  zoneadmd has initialized the
- * environment with the following:
- *
- * _ZONECFG_attr_dataset_uuid=fbd0d30b-65e1-ea38-ec78-8dad1c41d143
- * _ZONECFG_attr_ram=8192
- * _ZONECFG_attr_resolvers=8.8.8.8,8.8.4.4
- * _ZONECFG_attr_vcpus=4
- * _ZONECFG_attr_vm_autoboot=false
- * _ZONECFG_attr_vm_version=1
- * _ZONECFG_device_/dev/zvol/rdsk/zones/b2_disk0_boot=true
- * _ZONECFG_device_/dev/zvol/rdsk/zones/b2_disk0_image_size=10240
- * _ZONECFG_device_/dev/zvol/rdsk/zones/b2_disk0_image_uuid=6aac0370-...
- * _ZONECFG_device_/dev/zvol/rdsk/zones/b2_disk0_media=disk
- * _ZONECFG_device_/dev/zvol/rdsk/zones/b2_disk0_model=virtio
- * _ZONECFG_net_net0_address=
- * _ZONECFG_net_net0_allowed_address=172.26.17.202
- * _ZONECFG_net_net0_defrouter=
- * _ZONECFG_net_net0_gateway=172.26.17.1
- * _ZONECFG_net_net0_gateways=172.26.17.1
- * _ZONECFG_net_net0_global_nic=external
- * _ZONECFG_net_net0_ip=172.26.17.202
- * _ZONECFG_net_net0_ips=172.26.17.202/24
- * _ZONECFG_net_net0_mac_addr=02:08:20:84:61:a2
- * _ZONECFG_net_net0_model=virtio
- * _ZONECFG_net_net0_netmask=255.255.255.0
- * _ZONECFG_net_net0_physical=net0
- * _ZONECFG_net_net0_primary=true
- * _ZONECFG_net_net0_vlan_id=3317
- * _ZONECFG_net_resources=net0 
+ * This program runs as a child of zoneadmd, which sets a variety of
+ * _ZONECFG_<resource>_<instance> properties so that child processes don't have
+ * to parse xml.
  */
 
 #include <assert.h>
@@ -66,11 +40,6 @@
 boolean_t debug;
 
 #define	dprintf(x) if (debug) (void)printf x
-#define	return(x) { \
-	dprintf(("%s:%d %s returns %d\n", __FILE__, __LINE__, __func__, x)); \
-	return (x); \
-}
-
 
 char *
 get_zcfg_var(char *rsrc, char *inst, char *prop)
@@ -293,6 +262,21 @@ add_lpc(int *argc, char **argv)
 	return (0);
 }
 
+/* Must be called last */
+int
+add_vmname(int *argc, char **argv)
+{
+	char *val = getenv("_ZONECFG_vmname");
+
+	if (val == NULL || val[0] == '\0') {
+		val = "SYSbhyve-unknown";
+	}
+	if (add_arg(argc, argv, val) != 0) {
+		return (-1);
+	}
+	return (0);
+}
+
 /*
  * Write the entire buffer or return an error.  This function could be more
  * paranoid and call fdsync() at the end.  That's not really need for this use
@@ -365,7 +349,7 @@ main(int argc, char **argv)
 	    add_ram(&zhargc, (char **)&zhargv) != 0 ||
 	    add_disks(&zhargc, (char **)&zhargv) != 0 ||
 	    add_nets(&zhargc, (char **)&zhargv) != 0 ||
-	    add_arg(&zhargc, (char **)&zhargv, zonename) != 0) {
+	    add_vmname(&zhargc, (char **)&zhargv) != 0) {
 		return (1);
 	}
 
