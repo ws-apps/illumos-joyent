@@ -37,7 +37,7 @@
  *
  * If there's more than one zhyve instance on the zone, also filter on zonename.
  */
-#define	ZHYVE_LOG_FILE	"/var/run/bhyve/zhyve.log"
+#define	ZHYVE_LOG_FILE	"/tmp/zhyve.log"
 
 extern int bhyve_main(int, char **);
 const char *cmdname;
@@ -141,7 +141,7 @@ main(int argc, char **argv)
 		(void) dup2(fd, STDIN_FILENO);
 		(void) close(fd);
 	}
-	fd = open(ZHYVE_LOG_FILE, O_WRONLY|O_CREAT, 0644);
+	fd = open(ZHYVE_LOG_FILE, O_WRONLY|O_CREAT|O_APPEND, 0644);
 	assert(fd >= 0);
 	(void) dup2(fd, STDOUT_FILENO);
 	setvbuf(stdout, NULL, _IONBF, 0);
