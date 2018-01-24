@@ -1025,6 +1025,7 @@ uart_sock_backend(struct uart_softc *sc, const char *inopts)
 	assert(error == 0);
 
 	sc->sock = true;
+	sc->tty.fd = -1;
 
 	return (0);
 }
@@ -1064,7 +1065,7 @@ uart_set_backend(struct uart_softc *sc, const char *opts)
 	}
 
 	/* Make the backend file descriptor non-blocking */
-	if (retval == 0)
+	if (retval == 0 && sc->tty.fd != -1)
 		retval = fcntl(sc->tty.fd, F_SETFL, O_NONBLOCK);
 
 #ifndef WITHOUT_CAPSICUM
