@@ -126,6 +126,7 @@ int bcons_wait = 0;
 int bcons_connected = 0;
 pthread_mutex_t bcons_wait_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t bcons_wait_done = PTHREAD_COND_INITIALIZER;
+void (*vm_started_cb)(void) = NULL;
 #endif
 
 static cpuset_t cpumask;
@@ -1114,6 +1115,10 @@ main(int argc, char *argv[])
 #ifdef	__FreeBSD__
 	mevent_dispatch();
 #else
+	if (vm_started_cb != NULL) {
+		vm_started_cb();
+	}
+
 	pthread_exit(NULL);
 #endif
 

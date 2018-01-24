@@ -27,19 +27,14 @@
 #include <unistd.h>
 
 #define	ZHYVE_CMD_FILE	"/var/run/bhyve/zhyve.cmd"
-
-/*
- * This log file is on tmpfs and does not survive halt.  For startup failures:
- *
- *   dtrace -wn 'syscall:::entry
- *       /execname == "zhyve"/
- *       { stop(); system("truss -t write -wall -f -p %d\n", pid); exit(0);}'
- *
- * If there's more than one zhyve instance on the zone, also filter on zonename.
- */
 #define	ZHYVE_LOG_FILE	"/tmp/zhyve.log"
 
+/* XXX-mg this is to support vmadm.  It should not be here. */
+#define	FILE_PROVISIONING	"/var/svc/provisioning"
+#define	FILE_PROVISION_SUCCESS	"/var/svc/provision_success"
+
 extern int bhyve_main(int, char **);
+void (*vm_started_cb)(void);
 const char *cmdname;
 
 /*
@@ -123,12 +118,23 @@ parse_options_file(const char *path, uint *argcp, char ***argvp)
 	return (ret);
 }
 
+static void
+mark_provisioned(void)
+{
+	if (rename(FILE_PROVISIONING, FILE_PROVISION_SUCCESS) != 0) {
+		(void) fprintf(stderr, "Cannot rename %s to %s: %s\n",
+		    FILE_PROVISIONING, FILE_PROVISION_SUCCESS,
+		    strerror(errno));
+	}
+}
+
 int
 main(int argc, char **argv)
 {
 	uint zargc;
 	char **zargv;
 	int fd;
+	struct stat stbuf;
 
 	get_cmdname(argv[0]);
 	if (strcmp(cmdname, "zhyve") != 0) {
@@ -155,6 +161,10 @@ main(int argc, char **argv)
 		(void) fprintf(stderr, "%s: failed to parse %s: %s\n",
 		    cmdname, ZHYVE_CMD_FILE, strerror(errno));
 		return (1);
+	}
+
+	if (lstat(FILE_PROVISIONING, &stbuf) == 0) {
+		vm_started_cb = mark_provisioned;
 	}
 
 	return (bhyve_main(zargc, zargv));
