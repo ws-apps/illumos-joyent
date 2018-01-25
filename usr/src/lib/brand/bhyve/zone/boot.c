@@ -262,6 +262,37 @@ add_lpc(int *argc, char **argv)
 	return (0);
 }
 
+int
+add_bhyve_opts(int *argc, char **argv)
+{
+	char *val;
+	char *tok;
+	char *lasts;
+
+	if ((val = get_zcfg_var("attr", "bhyve_opts", NULL)) == NULL) {
+		return (0);
+	}
+
+	val = strdup(val);
+	if (val == NULL) {
+		(void) printf("Error: strdup failed\n");
+		return (-1);
+	}
+
+	for (tok = strtok_r(val, " \t", &lasts); tok != NULL;
+	    tok = strtok_r(NULL, " \t", &lasts)) {
+		if (tok[0] == '\0') {
+			continue;
+		}
+		if (add_arg(argc, argv, tok) != 0) {
+			return (-1);
+		}
+	}
+
+	free(val);
+	return (0);
+}
+
 /* Must be called last */
 int
 add_vmname(int *argc, char **argv)
@@ -349,6 +380,7 @@ main(int argc, char **argv)
 	    add_ram(&zhargc, (char **)&zhargv) != 0 ||
 	    add_disks(&zhargc, (char **)&zhargv) != 0 ||
 	    add_nets(&zhargc, (char **)&zhargv) != 0 ||
+	    add_bhyve_opts(&zhargc, (char **)&zhargv) != 0 ||
 	    add_vmname(&zhargc, (char **)&zhargv) != 0) {
 		return (1);
 	}
