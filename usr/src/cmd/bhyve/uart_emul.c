@@ -500,7 +500,7 @@ uart_sock_drain(struct uart_softc *sc)
 	if ((sc->mcr & MCR_LOOPBACK) != 0) {
 		(void) read(sc->usc_sock.clifd, &ch, 1);
 	} else {
-		for (;;) {
+		while (rxfifo_available(sc)) {
 			nbytes = read(sc->usc_sock.clifd, &ch, 1);
 			if (nbytes == 0) {
 				ret = 1;
