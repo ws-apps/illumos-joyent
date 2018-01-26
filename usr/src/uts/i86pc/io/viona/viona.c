@@ -1211,7 +1211,12 @@ viona_worker_tx(viona_vring_t *ring, viona_link_t *link)
 	ASSERT(MUTEX_HELD(&ring->vr_lock));
 
 	while (ring->vr_xfer_outstanding != 0) {
-		cv_wait_sig(&ring->vr_cv, &ring->vr_lock);
+		/*
+		 * Paying heed to signals is counterproductive here.  This is a
+		 * very tight loop if pending transfers take an extended amount
+		 * of time to be reclaimed while the host process is exiting.
+		 */
+		cv_wait(&ring->vr_cv, &ring->vr_lock);
 	}
 }
 
