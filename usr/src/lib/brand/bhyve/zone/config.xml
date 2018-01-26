@@ -40,7 +40,7 @@
 	<postclone />
 	<postinstall />
 	<attach>/usr/lib/brand/bhyve/attach -z %z -R %R</attach>
-	<detach />
+	<detach>/usr/lib/brand/bhyve/detach -z %z -R %R</detach>
 	<clone>/usr/lib/brand/bhyve/clone -z %z -R %R %Z</clone>
 	<uninstall>/usr/lib/brand/bhyve/uninstall -z %z -R %R</uninstall>
 	<prestatechange>/usr/lib/brand/bhyve/statechange pre %z %R</prestatechange>

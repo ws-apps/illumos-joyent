@@ -15,7 +15,7 @@ include $(SRC)/cmd/Makefile.cmd
 include ../Makefile.bhyve
 include $(SRC)/cmd/Makefile.cmd.64
 
-PROGS =		statechange
+PROGS =		attach detach statechange uninstall
 
 PROG1 =		boot
 OBJS1 =		boot.o
@@ -27,6 +27,10 @@ $(PROG1) :=	LDLIBS += -lnvpair
 TEMPLATES =	SYSbhyve.xml
 XMLDOCS =	config.xml platform.xml
 CLOBBERFILES =	$(ROOTXMLDOCS) $(ROOTTEMPLATES) $(ROOTPROGS)
+
+# This shouldn't be necessary, but for some reason the same thing in
+# ../../Makefile.brand is not being picked up.
+$(ROOTPROGS) :=	FILEMODE = 755
 
 all: $(PROGS)
 
