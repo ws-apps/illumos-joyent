@@ -351,6 +351,7 @@ main(int argc, char **argv)
 	char *zhargv[ZH_MAXARGS] = {
 		"zhyve",		/* Squats on argv[0] */
 		"-P", "-H",		/* Guest exits on pause and halt isns */
+		"-B", "1,product=SmartDC HVM",	/* XXX-mg should be dynamic */
 		NULL };
 	int zhargc;
 	nvlist_t *nvl;
