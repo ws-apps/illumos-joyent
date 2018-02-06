@@ -123,6 +123,7 @@ $(YACC_FILES) := YTABC = $(LY_BASE)parse.c
 OBJS += $(LEX_C_FILES:.c=.o) $(YACC_C_FILES:.c=.o)
 
 GM4FLAGS = -P
+LFLAGS = -i -s
 
 .KEEP_STATE:
 
