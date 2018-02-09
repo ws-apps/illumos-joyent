@@ -54,14 +54,14 @@
 #include <sys/mac_client.h>
 #include <sys/mac_provider.h>
 #include <sys/mac_client_priv.h>
+#include <sys/vlan.h>
 
 #include <sys/vmm_drv.h>
 #include <sys/viona_io.h>
 
-/*
- * Min. octets in an ethernet frame minus FCS
- */
-#define	MIN_BUF_SIZE	60
+/* Min. octets in an ethernet frame minus FCS */
+#define	MIN_BUF_SIZE		60
+#define	NEED_VLAN_PAD_SIZE	(MIN_BUF_SIZE - VLAN_TAGSZ)
 
 #define	VIONA_NAME		"Virtio Network Accelerator"
 
@@ -266,6 +266,7 @@ static dev_info_t		*viona_dip;
 static id_space_t		*viona_minors;
 static kmem_cache_t		*viona_desb_cache;
 static sdev_plugin_hdl_t	viona_sdev_hdl;
+static mblk_t			*viona_vlan_pad_mp;
 
 /*
  * copy tx mbufs from virtio ring to avoid necessitating a wait for packet
@@ -478,6 +479,8 @@ viona_info(dev_info_t *dip, ddi_info_cmd_t cmd, void *arg, void **result)
 static int
 viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 {
+	mblk_t *mp;
+
 	if (cmd != DDI_ATTACH) {
 		return (DDI_FAILURE);
 	}
@@ -501,6 +504,12 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
+	/* Create mblk for padding when VLAN tags are stripped */
+	mp = allocb_wait(VLAN_TAGSZ, BPRI_HI, STR_NOSIG, NULL);
+	bzero(mp->b_rptr, VLAN_TAGSZ);
+	mp->b_wptr += VLAN_TAGSZ;
+	viona_vlan_pad_mp = mp;
+
 	set_viona_tx_mode();
 	ddi_report_dev(viona_dip);
 
@@ -510,6 +519,8 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 static int
 viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 {
+	mblk_t *mp;
+
 	if (cmd != DDI_DETACH) {
 		return (DDI_FAILURE);
 	}
@@ -519,12 +530,16 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 	}
 	viona_sdev_hdl = NULL;
 
+	/* Clean up the VLAN padding mblk */
+	mp = viona_vlan_pad_mp;
+	viona_vlan_pad_mp = NULL;
+	VERIFY(mp != NULL && mp->b_cont == NULL);
+	freemsg(mp);
+
 	kmem_cache_destroy(viona_desb_cache);
 
 	id_space_destroy(viona_minors);
-
 	ddi_remove_minor_node(viona_dip, NULL);
-
 	viona_dip = NULL;
 
 	return (DDI_SUCCESS);
@@ -1504,7 +1519,7 @@ viona_intr_ring(viona_vring_t *ring)
 }
 
 static size_t
-viona_copy_mblk(mblk_t *mp, size_t seek, caddr_t buf, size_t len,
+viona_copy_mblk(const mblk_t *mp, size_t seek, caddr_t buf, size_t len,
     boolean_t *end)
 {
 	size_t copied = 0;
@@ -1548,7 +1563,7 @@ viona_copy_mblk(mblk_t *mp, size_t seek, caddr_t buf, size_t len,
 }
 
 static int
-viona_recv_plain(viona_vring_t *ring, mblk_t *mp, size_t msz)
+viona_recv_plain(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 {
 	struct iovec iov[VTNET_MAXSEGS];
 	uint16_t cookie;
@@ -1601,6 +1616,9 @@ viona_recv_plain(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	 * the minimum length?  Does it match the total length of the mblk?
 	 */
 	if (copied < MIN_BUF_SIZE || copied != msz) {
+		VIONA_PROBE5(too_short, viona_vring_t *, ring,
+		    uint16_t, cookie, mblk_t *, mp, size_t, copied,
+		    size_t, msz);
 		goto bad_frame;
 	}
 
@@ -1612,7 +1630,8 @@ viona_recv_plain(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	if ((ring->vr_link->l_features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
 		uint32_t cksum_flags;
 
-		mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &cksum_flags);
+		mac_hcksum_get((mblk_t *)mp, NULL, NULL, NULL, NULL,
+		    &cksum_flags);
 		if ((cksum_flags & HCK_FULLCKSUM_OK) != 0) {
 			hdr->vrh_flags |= VIRTIO_NET_HDR_F_DATA_VALID;
 		}
@@ -1630,7 +1649,7 @@ bad_frame:
 }
 
 static int
-viona_recv_merged(viona_vring_t *ring, mblk_t *mp, size_t msz)
+viona_recv_merged(viona_vring_t *ring, const mblk_t *mp, size_t msz)
 {
 	struct iovec iov[VTNET_MAXSEGS];
 	used_elem_t uelem[VTNET_MAXSEGS];
@@ -1735,7 +1754,7 @@ viona_recv_merged(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	 */
 	if (copied < MIN_BUF_SIZE || copied != msz) {
 		/* Do not override an existing error */
-		VIONA_PROBE5(too__short, viona_vring_t *, ring,
+		VIONA_PROBE5(too_short, viona_vring_t *, ring,
 		    uint16_t, cookie, mblk_t *, mp, size_t, copied,
 		    size_t, msz);
 		err = (err == 0) ? EINVAL : err;
@@ -1745,7 +1764,8 @@ viona_recv_merged(viona_vring_t *ring, mblk_t *mp, size_t msz)
 	if ((ring->vr_link->l_features & VIRTIO_NET_F_GUEST_CSUM) != 0) {
 		uint32_t cksum_flags;
 
-		mac_hcksum_get(mp, NULL, NULL, NULL, NULL, &cksum_flags);
+		mac_hcksum_get((mblk_t *)mp, NULL, NULL, NULL, NULL,
+		    &cksum_flags);
 		if ((cksum_flags & HCK_FULLCKSUM_OK) != 0) {
 			hdr->vrh_flags |= VIRTIO_NET_HDR_F_DATA_VALID;
 		}
@@ -1787,15 +1807,43 @@ viona_rx(void *arg, mac_resource_handle_t mrh, mblk_t *mp, boolean_t loopback)
 	size_t nrx = 0, ndrop = 0;
 
 	while (mp != NULL) {
-		mblk_t *next  = mp->b_next;
-		const size_t size = msgsize(mp);
+		mblk_t *next, *pad = NULL;
+		size_t size;
 		int err = 0;
 
+		next = mp->b_next;
 		mp->b_next = NULL;
+		size = msgsize(mp);
+
+		/*
+		 * Stripping the VLAN tag off already-small frames can cause
+		 * them to fall below the minimum size.  If this happens, pad
+		 * them out as they would have been if they lacked the tag in
+		 * the first place.
+		 */
+		if (size == NEED_VLAN_PAD_SIZE) {
+			ASSERT(MBLKL(viona_vlan_pad_mp) == VLAN_TAGSZ);
+			ASSERT(viona_vlan_pad_mp->b_cont == NULL);
+
+			for (pad = mp; pad->b_cont != NULL; pad = pad->b_cont)
+				;
+
+			pad->b_cont = viona_vlan_pad_mp;
+			size += VLAN_TAGSZ;
+		}
+
 		if (do_merge) {
 			err = viona_recv_merged(ring, mp, size);
 		} else {
 			err = viona_recv_plain(ring, mp, size);
+		}
+
+		/*
+		 * The VLAN padding mblk is meant for continual reuse, so
+		 * remove it from the chain to prevent it from being freed
+		 */
+		if (pad != NULL) {
+			pad->b_cont = NULL;
 		}
 
 		if (err != 0) {
