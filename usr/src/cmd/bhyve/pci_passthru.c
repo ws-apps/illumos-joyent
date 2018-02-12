@@ -671,9 +671,8 @@ cfginit(struct vmctx *ctx, struct passthru_softc *sc)
 static int
 passthru_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 {
-	int bus, slot, func, error, memflags;
+	int error, memflags, pptfd;
 	struct passthru_softc *sc;
-	int pptfd;
 
 	sc = NULL;
 	error = 1;

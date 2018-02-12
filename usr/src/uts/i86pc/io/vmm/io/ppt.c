@@ -826,7 +826,7 @@ ppt_reset_pci_power_state(dev_info_t *dip)
 	val = PCI_CAP_GET16(cfg, NULL, cap_ptr, PCI_PMCSR);
 	if ((val & PCI_PMCSR_STATE_MASK) != PCI_PMCSR_D0) {
 		val = (val & ~PCI_PMCSR_STATE_MASK) | PCI_PMCSR_D0;
-		PCI_CAP_PUT16(cfg, NULL, cap_ptr, PCI_PMCSR, val);
+		(void) PCI_CAP_PUT16(cfg, NULL, cap_ptr, PCI_PMCSR, val);
 	}
 }
 
