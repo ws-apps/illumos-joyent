@@ -297,10 +297,14 @@ add_bhyve_opts(int *argc, char **argv)
 int
 add_vmname(int *argc, char **argv)
 {
-	char *val = getenv("_ZONECFG_vmname");
+	char buf[32];				/* VM_MAX_NAMELEN */
+	char *val = getenv("_ZONECFG_did");
 
 	if (val == NULL || val[0] == '\0') {
 		val = "SYSbhyve-unknown";
+	} else {
+		(void) snprintf(buf, sizeof (buf), "SYSbhyve-%s", val);
+		val = buf;
 	}
 	if (add_arg(argc, argv, val) != 0) {
 		return (-1);
