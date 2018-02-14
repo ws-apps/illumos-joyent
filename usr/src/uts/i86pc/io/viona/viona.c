@@ -37,7 +37,6 @@
  */
 #include <sys/conf.h>
 #include <sys/file.h>
-#include <sys/fs/sdev_plugin.h>
 #include <sys/stat.h>
 #include <sys/ddi.h>
 #include <sys/disp.h>
@@ -264,8 +263,6 @@ typedef struct used_elem {
 static void			*viona_state;
 static dev_info_t		*viona_dip;
 static id_space_t		*viona_minors;
-static kmem_cache_t		*viona_desb_cache;
-static sdev_plugin_hdl_t	viona_sdev_hdl;
 static mblk_t			*viona_vlan_pad_mp;
 
 /*
@@ -354,53 +351,6 @@ static struct modlinkage modlinkage = {
 	MODREV_1, &modldrv, NULL
 };
 
-static sdev_plugin_validate_t
-viona_sdev_validate(sdev_ctx_t ctx)
-{
-	minor_t minor;
-
-	if (strcmp(sdev_ctx_name(ctx), VIONA_CTL_NODE_NAME) != 0)
-		return (SDEV_VTOR_INVALID);
-
-	VERIFY3S(sdev_ctx_minor(ctx, &minor), ==, 0);
-
-	if (minor != VIONA_CTL_MINOR)
-		return (SDEV_VTOR_STALE);
-
-	return (SDEV_VTOR_VALID);
-}
-
-static int
-viona_sdev_filldir(sdev_ctx_t ctx)
-{
-	int ret;
-
-	if (strcmp(sdev_ctx_path(ctx), VIONA_DEV_DIR) != 0)
-		return (EINVAL);
-
-	ret = sdev_plugin_mknod(ctx, VIONA_CTL_NODE_NAME, S_IFCHR,
-	    makedevice(ddi_driver_major(viona_dip), VIONA_CTL_MINOR));
-	if (ret == EEXIST)
-		ret = 0;
-
-	return (ret);
-}
-
-/* ARGSUSED */
-void
-viona_sdev_inactive(sdev_ctx_t ctx)
-{
-	/* Nothing to do */
-}
-
-static struct sdev_plugin_ops viona_sdev_ops = {
-	.spo_version = SDEV_PLUGIN_VERSION,
-	.spo_flags = SDEV_PLUGIN_SUBDIR,
-	.spo_validate = viona_sdev_validate,
-	.spo_filldir = viona_sdev_filldir,
-	.spo_inactive = viona_sdev_inactive
-};
-
 int
 _init(void)
 {
@@ -485,24 +435,13 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
+	if (ddi_create_minor_node(dip, "viona", S_IFCHR, VIONA_CTL_MINOR,
+	    DDI_PSEUDO, 0) != DDI_SUCCESS) {
+		return (DDI_FAILURE);
+	}
+
 	viona_minors = id_space_create("viona_minors",
 	    VIONA_CTL_MINOR + 1, UINT16_MAX);
-
-	if (ddi_create_minor_node(dip, VIONA_CTL_NODE_NAME,
-	    S_IFCHR, VIONA_CTL_MINOR, DDI_PSEUDO, 0) != DDI_SUCCESS) {
-		return (DDI_FAILURE);
-	}
-
-	viona_dip = dip;
-
-	viona_sdev_hdl = sdev_plugin_register("viona", &viona_sdev_ops, NULL);
-	if (viona_sdev_hdl == NULL) {
-		ddi_remove_minor_node(dip, VIONA_CTL_NODE_NAME);
-		kmem_cache_destroy(viona_desb_cache);
-		viona_desb_cache = NULL;
-		viona_dip = NULL;
-		return (DDI_FAILURE);
-	}
 
 	/* Create mblk for padding when VLAN tags are stripped */
 	mp = allocb_wait(VLAN_TAGSZ, BPRI_HI, STR_NOSIG, NULL);
@@ -511,6 +450,7 @@ viona_attach(dev_info_t *dip, ddi_attach_cmd_t cmd)
 	viona_vlan_pad_mp = mp;
 
 	set_viona_tx_mode();
+	viona_dip = dip;
 	ddi_report_dev(viona_dip);
 
 	return (DDI_SUCCESS);
@@ -525,18 +465,11 @@ viona_detach(dev_info_t *dip, ddi_detach_cmd_t cmd)
 		return (DDI_FAILURE);
 	}
 
-	if (sdev_plugin_unregister(viona_sdev_hdl) != 0) {
-		return (DDI_FAILURE);
-	}
-	viona_sdev_hdl = NULL;
-
 	/* Clean up the VLAN padding mblk */
 	mp = viona_vlan_pad_mp;
 	viona_vlan_pad_mp = NULL;
 	VERIFY(mp != NULL && mp->b_cont == NULL);
 	freemsg(mp);
-
-	kmem_cache_destroy(viona_desb_cache);
 
 	id_space_destroy(viona_minors);
 	ddi_remove_minor_node(viona_dip, NULL);
