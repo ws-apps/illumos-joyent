@@ -943,7 +943,7 @@ setup_subproc_env(boolean_t debug)
 	(void) setenv("_ZONECFG_device_resources", dev_resources, 1);
 
 	/*
-	 * "attr" resources are exported because the bhyve brand's boot hok
+	 * "attr" resources are exported because the bhyve brand's boot hook
 	 * needs access to the "ram", "cpu", "bootrom", etc. to form the
 	 * argument list for the brand's init program.  Once the bhyve brand is
 	 * configured via proper resources and properties, this should be
