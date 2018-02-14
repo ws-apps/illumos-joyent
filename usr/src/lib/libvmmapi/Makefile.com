@@ -11,8 +11,6 @@
 LIBRARY	= libvmmapi.a
 VERS		= .1
 
-BHYVELIBS	= libvmmapi.so$(VERS)
-
 OBJECTS	= vmmapi.o expand_number.o
 
 # include library definitions

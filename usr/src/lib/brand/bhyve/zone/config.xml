@@ -21,7 +21,7 @@
 <brand name="bhyve">
 	<modname></modname>
 
-	<initname>/usr/sbin/zhyve</initname>
+	<initname>/usr/lib/brand/bhyve/zhyve</initname>
 	<restartinit>false</restartinit>
 	<login_cmd />
 	<forcedlogin_cmd />

@@ -14,7 +14,6 @@
 # notice.
 #
 PROG=		iasl
-BHYVEPROG=	$(PROG)
 
 include ../../Makefile.cmd
 include ../../Makefile.cmd.64
@@ -127,7 +126,7 @@ LFLAGS = -i -s
 
 .KEEP_STATE:
 
-all: $(YACC_FILES) .WAIT $(PROG) $(BHYVEUSRSBIN)/$(BHYVEPROG)
+all: $(YACC_FILES) .WAIT $(PROG)
 
 aslcompiler.y: aslparser.y
 	$(GM4) $(GM4FLAGS) aslparser.y > $@
@@ -149,10 +148,6 @@ $(LEX_C_FILES):
 $(PROG): $(OBJS)
 	$(LINK.c) -o $@ $(OBJS) $(LDLIBS)
 	$(POST_PROCESS)
-
-$(BHYVEUSRSBIN)/$(BHYVEPROG): $(ROOTUSRSBIN)/$(PROG)
-	$(RM) $@
-	$(LN) $(ROOTUSRSBIN)/$(PROG) $@
 
 install: all $(ROOTUSRSBINPROG)
 

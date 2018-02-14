@@ -22,7 +22,6 @@
 #
 # Copyright 2004 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
-# Copyright (c) 2018, Joyent, Inc.
 #
 # ident	"%Z%%M%	%I%	%E% SMI"
 #
@@ -34,4 +33,4 @@ LIBS = $(DYNLIB) $(LINTLIB)
 
 all: $(LIBS)
 
-install: all $(ROOTLIBS64) $(ROOTLINKS64) $(BHYVEROOTLIBS64)
+install: all $(ROOTLIBS64) $(ROOTLINKS64)

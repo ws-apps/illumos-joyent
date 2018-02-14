@@ -25,7 +25,6 @@
 
 LIBRARY =	libmd.a
 VERS =		.1
-BHYVELIBS =	libmd.so$(VERS)
 
 OBJECTS =	edonr.o md4.o md5.o sha1.o sha2.o \
 		skein.o skein_block.o skein_iv.o
@@ -50,8 +49,7 @@ AS_CPPFLAGS += -D_ASM
 
 all:		$(LIBS)
 
-install:	all $(ROOTLIBS64) $(ROOTLINKS64) $(ROOTLINT64) \
-		$(BHYVEROOTLIBS64)
+install:	all $(ROOTLIBS64) $(ROOTLINKS64) $(ROOTLINT64)
 
 lint:		lintcheck
 

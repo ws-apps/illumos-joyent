@@ -12,7 +12,6 @@
 #
 
 PROG= bhyve
-BHYVEPROG= zhyve
 
 SRCS =	acpi.c			\
 	atkbdc.c		\
@@ -89,15 +88,11 @@ POST_PROCESS += ; $(GENSETDEFS) $@
 # Real main is in zhyve.c
 bhyverun.o :=	CPPFLAGS += -Dmain=bhyve_main
 
-all: $(PROG) $(BHYVEUSRSBIN)/$(BHYVEPROG)
+all: $(PROG)
 
 $(PROG): $(OBJS)
 	$(LINK.c) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 	$(POST_PROCESS)
-
-$(BHYVEUSRSBIN)/$(BHYVEPROG): $(ROOTUSRSBIN64)/$(PROG)
-	$(RM) $@
-	$(LN) $(ROOTUSRSBIN64)/$(PROG) $@
 
 install: all $(ROOTUSRSBINPROG)
 

@@ -53,20 +53,9 @@ i386_DIRS= \
 	/boot/acpi/tables \
 	/boot/grub \
 	/boot/grub/bin \
-	/lib/brand \
-	/lib/brand/bhyve \
-	/lib/brand/bhyve/root \
-	/lib/brand/bhyve/root/lib \
 	/lib/libmvec \
 	/platform/i86pc \
 	/usr/lib/brand/bhyve \
-	/usr/lib/brand/bhyve/root \
-	/usr/lib/brand/bhyve/root/lib \
-	/usr/lib/brand/bhyve/root/usr \
-	/usr/lib/brand/bhyve/root/usr/lib \
-	/usr/lib/brand/bhyve/root/usr/sbin \
-	/usr/lib/brand/bhyve/root/usr/share \
-	/usr/lib/brand/bhyve/root/usr/share/bhyve \
 	/usr/lib/brand/lx \
 	/usr/lib/brand/lx/amd64 \
 	/usr/lib/brand/lx/distros \
@@ -451,9 +440,7 @@ sparcv9_DIRS64= \
 	/usr/platform/sun4u-opl/lib
 
 amd64_DIRS64= \
-	/lib/brand/bhyve/root/lib/$(MACH64) \
-	/platform/i86pc/amd64 \
-	/usr/lib/brand/bhyve/root/usr/lib/$(MACH64)
+	/platform/i86pc/amd64
 
 DIRS64= \
 	$($(MACH64)_DIRS64) \

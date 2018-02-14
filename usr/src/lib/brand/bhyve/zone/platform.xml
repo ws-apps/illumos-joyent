@@ -23,10 +23,10 @@
 	<!-- Global filesystems to mount when booting the zone -->
 	<global_mount special="/dev" directory="/dev" type="dev"
 	    opt="attrdir=%R/root/dev"/>
-	<global_mount special="/lib/brand/bhyve/root/lib" directory="/lib"
-	    opt="ro,nodevices" type="lofs" />
-	<global_mount special="/usr/lib/brand/bhyve/root/usr" directory="/usr"
-	    opt="ro,nodevices" type="lofs" />
+	<global_mount special="/lib" directory="/lib"
+	    opt="ro,nodevices,nosub" type="lofs" />
+	<global_mount special="/usr" directory="/usr"
+	    opt="ro,nodevices,nosub" type="lofs" />
 
 	<!-- Local filesystems to mount when booting the zone -->
 	<mount special="swap" directory="/var/run" type="tmpfs"
