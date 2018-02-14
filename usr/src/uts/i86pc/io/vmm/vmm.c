@@ -104,6 +104,10 @@ struct vlapic;
 struct vcpu {
 	struct mtx 	mtx;		/* (o) protects 'state' and 'hostcpu' */
 	enum vcpu_state	state;		/* (o) vcpu state */
+#ifndef __FreeBSD__
+	kcondvar_t	vcpu_cv;	/* (o) cpu waiter cv */
+	kcondvar_t	state_cv;	/* (o) IDLE-transition cv */
+#endif /* __FreeBSD__ */
 	int		hostcpu;	/* (o) vcpu's host cpu */
 	int		reqidle;	/* (i) request vcpu to idle */
 	struct vlapic	*vlapic;	/* (i) APIC device model */
@@ -169,6 +173,9 @@ struct vm {
 	void		*rendezvous_arg;	/* (x) rendezvous func/arg */
 	vm_rendezvous_func_t rendezvous_func;
 	struct mtx	rendezvous_mtx;		/* (o) rendezvous lock */
+#ifndef __FreeBSD__
+	kcondvar_t	rendezvous_cv;		/* (0) rendezvous condvar */
+#endif
 	struct mem_map	mem_maps[VM_MAX_MEMMAPS]; /* (i) guest address space */
 	struct mem_seg	mem_segs[VM_MAX_MEMSEGS]; /* (o) guest memory regions */
 	struct vmspace	*vmspace;		/* (o) guest's address space */
@@ -1226,7 +1233,11 @@ vcpu_set_state_locked(struct vm *vm, int vcpuid, enum vcpu_state newstate,
 			vcpu_notify_event_locked(vcpu, false);
 			VCPU_CTR1(vm, vcpuid, "vcpu state change from %s to "
 			    "idle requested", vcpu_state2str(vcpu->state));
+#ifdef __FreeBSD__
 			msleep_spin(&vcpu->state, &vcpu->mtx, "vmstat", hz);
+#else
+			cv_wait(&vcpu->state_cv, &vcpu->mtx.m);
+#endif
 		}
 	} else {
 		KASSERT(vcpu->state != VCPU_IDLE, ("invalid transition from "
@@ -1273,8 +1284,13 @@ vcpu_set_state_locked(struct vm *vm, int vcpuid, enum vcpu_state newstate,
 	else
 		vcpu->hostcpu = NOCPU;
 
-	if (newstate == VCPU_IDLE)
+	if (newstate == VCPU_IDLE) {
+#ifdef __FreeBSD__
 		wakeup(&vcpu->state);
+#else
+		cv_broadcast(&vcpu->state_cv);
+#endif
+	}
 
 	return (0);
 }
@@ -1348,12 +1364,20 @@ vm_handle_rendezvous(struct vm *vm, int vcpuid)
 		    &vm->rendezvous_done_cpus) == 0) {
 			VCPU_CTR0(vm, vcpuid, "Rendezvous completed");
 			vm_set_rendezvous_func(vm, NULL);
+#ifdef __FreeBSD__
 			wakeup(&vm->rendezvous_func);
+#else
+			cv_broadcast(&vm->rendezvous_cv);
+#endif
 			break;
 		}
 		RENDEZVOUS_CTR0(vm, vcpuid, "Wait for rendezvous completion");
+#ifdef __FreeBSD__
 		mtx_sleep(&vm->rendezvous_func, &vm->rendezvous_mtx, 0,
 		    "vmrndv", 0);
+#else
+		cv_wait(&vm->rendezvous_cv, &vm->rendezvous_mtx.m);
+#endif
 	}
 	mtx_unlock(&vm->rendezvous_mtx);
 }
@@ -1423,11 +1447,19 @@ vm_handle_hlt(struct vm *vm, int vcpuid, bool intr_disabled, bool *retu)
 
 		t = ticks;
 		vcpu_require_state_locked(vm, vcpuid, VCPU_SLEEPING);
+#ifdef __FreeBSD__
 		/*
 		 * XXX msleep_spin() cannot be interrupted by signals so
 		 * wake up periodically to check pending signals.
 		 */
 		msleep_spin(vcpu, &vcpu->mtx, wmesg, hz);
+#else
+		/*
+		 * Fortunately, cv_wait_sig can be interrupted by signals, so
+		 * there is no need to periodically wake up.
+		 */
+		(void) cv_wait_sig(&vcpu->vcpu_cv, &vcpu->mtx.m);
+#endif
 		vcpu_require_state_locked(vm, vcpuid, VCPU_FROZEN);
 		vmm_stat_incr(vm, vcpuid, VCPU_IDLE_TICKS, ticks - t);
 	}
@@ -1591,7 +1623,11 @@ vm_handle_suspend(struct vm *vm, int vcpuid, bool *retu)
 		if (vm->rendezvous_func == NULL) {
 			VCPU_CTR0(vm, vcpuid, "Sleeping during suspend");
 			vcpu_require_state_locked(vm, vcpuid, VCPU_SLEEPING);
+#ifdef __FreeBSD__
 			msleep_spin(vcpu, &vcpu->mtx, "vmsusp", hz);
+#else
+			cv_wait(&vcpu->vcpu_cv, &vcpu->mtx.m);
+#endif
 			vcpu_require_state_locked(vm, vcpuid, VCPU_FROZEN);
 		} else {
 			VCPU_CTR0(vm, vcpuid, "Rendezvous during suspend");
@@ -2493,8 +2529,13 @@ vcpu_notify_event_locked(struct vcpu *vcpu, bool lapic_intr)
 	} else {
 		KASSERT(hostcpu == NOCPU, ("vcpu state %d not consistent "
 		    "with hostcpu %d", vcpu->state, hostcpu));
-		if (vcpu->state == VCPU_SLEEPING)
+		if (vcpu->state == VCPU_SLEEPING) {
+#ifdef __FreeBSD__
 			wakeup_one(vcpu);
+#else
+			cv_signal(&vcpu->vcpu_cv);
+#endif
+		}
 	}
 }
 

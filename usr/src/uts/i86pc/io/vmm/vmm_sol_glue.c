@@ -9,33 +9,6 @@
  * or alteration will be a violation of federal law.
  */
 /*
- * Copyright (c) 2004 John Baldwin <jhb@FreeBSD.org>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * $FreeBSD: head/sys/kern/subr_sleepqueue.c 261520 2014-02-05 18:13:27Z jhb $
- */
-/*
  * Copyright (c) 2004 Poul-Henning Kamp
  * All rights reserved.
  *
@@ -445,209 +418,6 @@ ipi_cpu(int cpu, u_int ipi)
 	poke_cpu(cpu);
 }
 
-#define	SC_TABLESIZE	256			/* Must be power of 2. */
-#define	SC_MASK		(SC_TABLESIZE - 1)
-#define	SC_SHIFT	8
-#define	SC_HASH(wc)	((((uintptr_t)(wc) >> SC_SHIFT) ^ (uintptr_t)(wc)) & \
-			    SC_MASK)
-#define	SC_LOOKUP(wc)	&sleepq_chains[SC_HASH(wc)]
-
-struct sleepqueue {
-	u_int sq_blockedcnt;			/* Num. of blocked threads. */
-	LIST_ENTRY(sleepqueue) sq_hash;		/* Chain. */
-	void		*sq_wchan;		/* Wait channel. */
-	kcondvar_t	sq_cv;
-};
-
-struct sleepqueue_chain {
-	LIST_HEAD(, sleepqueue) sc_queues;	/* List of sleep queues. */
-	struct mtx	sc_lock;		/* Spin lock for this chain. */
-};
-
-static struct sleepqueue_chain	sleepq_chains[SC_TABLESIZE];
-
-#define	SLEEPQ_CACHE_SZ		(64)
-static kmem_cache_t		*vmm_sleepq_cache;
-
-static int
-vmm_sleepq_cache_init(void *buf, void *user_arg, int kmflags)
-{
-	struct sleepqueue *sq = (struct sleepqueue *)buf;
-
-	bzero(sq, sizeof (struct sleepqueue));
-	cv_init(&sq->sq_cv, NULL, CV_DRIVER, NULL);
-
-	return (0);
-}
-
-static void
-vmm_sleepq_cache_fini(void *buf, void *user_arg)
-{
-	struct sleepqueue *sq = (struct sleepqueue *)buf;
-	cv_destroy(&sq->sq_cv);
-}
-
-static void
-init_sleepqueues(void)
-{
-	int	i;
-
-        for (i = 0; i < SC_TABLESIZE; i++) {
-		LIST_INIT(&sleepq_chains[i].sc_queues);
-		mtx_init(&sleepq_chains[i].sc_lock, "sleepq chain", NULL,
-		    MTX_SPIN);
-	}
-
-	vmm_sleepq_cache = kmem_cache_create("vmm_sleepq_cache",
-	    sizeof (struct sleepqueue), SLEEPQ_CACHE_SZ, vmm_sleepq_cache_init,
-	    vmm_sleepq_cache_fini, NULL, NULL, NULL, 0);
-
-}
-
-/*
- * Lock the sleep queue chain associated with the specified wait channel.
- */
-static void
-sleepq_lock(void *wchan)
-{
-	struct sleepqueue_chain *sc;
-
-	sc = SC_LOOKUP(wchan);
-	mtx_lock_spin(&sc->sc_lock);
-}
-
-/*
- * Look up the sleep queue associated with a given wait channel in the hash
- * table locking the associated sleep queue chain.  If no queue is found in
- * the table, NULL is returned.
- */
-static struct sleepqueue *
-sleepq_lookup(void *wchan)
-{
-	struct sleepqueue_chain	*sc;
-	struct sleepqueue	*sq;
-
-	KASSERT(wchan != NULL, ("%s: invalid NULL wait channel", __func__));
-	sc = SC_LOOKUP(wchan);
-	mtx_assert(&sc->sc_lock, MA_OWNED);
-	LIST_FOREACH(sq, &sc->sc_queues, sq_hash)
-		if (sq->sq_wchan == wchan)
-			return (sq);
-	return (NULL);
-}
-
-/*
- * Unlock the sleep queue chain associated with a given wait channel.
- */
-static void
-sleepq_release(void *wchan)
-{
-	struct sleepqueue_chain *sc;
-
-	sc = SC_LOOKUP(wchan);
-	mtx_unlock_spin(&sc->sc_lock);
-}
-
-struct sleepqueue *
-sleepq_add(void *wchan)
-{
-	struct sleepqueue_chain	*sc;
-	struct sleepqueue	*sq;
-
-	sc = SC_LOOKUP(wchan);
-
-	/* Look up the sleep queue associated with the wait channel 'wchan'. */
-	sq = sleepq_lookup(wchan);
-
-	if (sq == NULL) {
-		sq = kmem_cache_alloc(vmm_sleepq_cache, KM_SLEEP);
-		LIST_INSERT_HEAD(&sc->sc_queues, sq, sq_hash);
-		sq->sq_wchan = wchan;
-	}
-
-	sq->sq_blockedcnt++;
-
-	return (sq);
-}
-
-void
-sleepq_remove(struct sleepqueue *sq)
-{
-	sq->sq_blockedcnt--;
-
-	if (sq->sq_blockedcnt == 0) {
-		LIST_REMOVE(sq, sq_hash);
-		kmem_cache_free(vmm_sleepq_cache, sq);
-	}
-}
-
-int
-msleep_spin(void *chan, struct mtx *mtx, const char *wmesg, int ticks)
-{
-	struct sleepqueue	*sq;
-	int			error = 0;
-
-	sleepq_lock(chan);
-	sq = sleepq_add(chan);
-	sleepq_release(chan);
-
-	cv_reltimedwait(&sq->sq_cv, &mtx->m, ticks, TR_CLOCK_TICK);
-
-	sleepq_lock(chan);
-	sleepq_remove(sq);
-	sleepq_release(chan);
-
-	return (error);
-}
-
-int
-mtx_sleep(void *chan, struct mtx *mtx, int pri, const char *wmsg, int timeo)
-{
-	struct sleepqueue *sq;
-
-	/* Current glue limitations */
-	ASSERT(timeo == 0);
-	ASSERT(pri == 0);
-
-	sleepq_lock(chan);
-	sq = sleepq_add(chan);
-	sleepq_release(chan);
-
-	cv_wait(&sq->sq_cv, &mtx->m);
-
-	sleepq_lock(chan);
-	sleepq_remove(sq);
-	sleepq_release(chan);
-
-	return (0);
-}
-
-void
-wakeup(void *chan)
-{
-	struct sleepqueue	*sq;
-
-	sleepq_lock(chan);
-	sq = sleepq_lookup(chan);
-	if (sq != NULL) {
-		cv_broadcast(&sq->sq_cv);
-	}
-	sleepq_release(chan);
-}
-
-void
-wakeup_one(void *chan)
-{
-	struct sleepqueue	*sq;
-
-	sleepq_lock(chan);
-	sq = sleepq_lookup(chan);
-	if (sq != NULL) {
-		cv_signal(&sq->sq_cv);
-	}
-	sleepq_release(chan);
-}
-
 u_int	cpu_high;		/* Highest arg to CPUID */
 u_int	cpu_exthigh;		/* Highest arg to extended CPUID */
 u_int	cpu_id;			/* Stepping ID */
@@ -830,7 +600,6 @@ vmm_sol_glue_init(void)
 {
 	vmm_cpuid_init();
 	fpu_save_area_init();
-	init_sleepqueues();
 	unr_idx = 0;
 }
 
@@ -838,7 +607,6 @@ void
 vmm_sol_glue_cleanup(void)
 {
 	fpu_save_area_cleanup();
-	kmem_cache_destroy(vmm_sleepq_cache);
 }
 
 int idtvec_justreturn;
