@@ -37,12 +37,21 @@
 
 #define	ZH_MAXARGS		100
 
+typedef enum {
+	PCI_SLOT_HOSTBRIDGE = 0,	/* Not used here, but reserved */
+	PCI_SLOT_LPC,
+	PCI_SLOT_CD,
+	PCI_SLOT_BOOT_DISK,
+	PCI_SLOT_OTHER_DISKS,
+	PCI_SLOT_NICS
+} pci_slot_t;
+
 boolean_t debug;
 
 #define	dprintf(x) if (debug) (void)printf x
 
 char *
-get_zcfg_var(char *rsrc, char *inst, char *prop)
+get_zcfg_var(const char *rsrc, const char *inst, const char *prop)
 {
 	char envvar[MAXNAMELEN];
 	char *ret;
@@ -64,6 +73,14 @@ get_zcfg_var(char *rsrc, char *inst, char *prop)
 	dprintf(("%s: '%s=%s'\n", __func__, envvar, ret ? ret : "<null>"));
 
 	return (ret);
+}
+
+boolean_t
+is_env_true(const char *rsrc, const char *inst, const char *prop)
+{
+	char *val = get_zcfg_var(rsrc, inst, prop);
+
+	return (val != NULL && strcmp(val, "true") == 0);
 }
 
 int
@@ -114,8 +131,8 @@ add_disks(int *argc, char **argv)
 	char *disks;
 	char *disk;
 	char *lasts;
-	const int pcislot = 2;
-	int nextpcifn = 2;		/* 0 for temp cd, 1 for boot */
+	int next_cd = 0;
+	int next_other = 0;
 	char slotconf[MAXNAMELEN];
 	char *boot = NULL;
 
@@ -125,9 +142,9 @@ add_disks(int *argc, char **argv)
 
 	for (disk = strtok_r(disks, " ", &lasts); disk != NULL;
 	    disk = strtok_r(NULL, " ", &lasts)) {
+		int pcislot;
 		int pcifn;
 		char *path;
-		char *val;
 
 		/* zoneadmd is not careful about a trailing delimiter. */
 		if (disk[0] == '\0') {
@@ -140,8 +157,7 @@ add_disks(int *argc, char **argv)
 		}
 
 		/* Allow at most one "primary" disk */
-		val = get_zcfg_var("device", disk, "boot");
-		if (val != NULL && strcmp(val, "true") == 0) {
+		if (is_env_true("device", disk, "boot")) {
 			if (boot != NULL) {
 				(void) printf("Error: "
 				    "multiple boot disks: %s %s\n",
@@ -149,13 +165,18 @@ add_disks(int *argc, char **argv)
 				return (-1);
 			}
 			boot = path;
+			pcislot = PCI_SLOT_BOOT_DISK;
 			pcifn = 0;
+		} else if (is_env_true("device", disk, "cdrom")) {
+			pcislot = PCI_SLOT_CD;
+			pcifn = next_cd;
+			next_cd++;
 		} else {
-			pcifn = nextpcifn;
-			nextpcifn++;
+			pcislot = PCI_SLOT_OTHER_DISKS;
+			pcifn = next_other;
+			next_other++;
 		}
 
-		/* XXX-mg handle non-virtio? */
 		if (snprintf(slotconf, sizeof (slotconf),
 		    "%d:%d,virtio-blk,%s", pcislot, pcifn, path) >=
 		    sizeof (slotconf)) {
@@ -178,7 +199,6 @@ add_nets(int *argc, char **argv)
 	char *nets;
 	char *net;
 	char *lasts;
-	const int pcislot = 3;
 	int nextpcifn = 1;		/* 0 reserved for primary */
 	char slotconf[MAXNAMELEN];
 	char *primary = NULL;
@@ -190,7 +210,6 @@ add_nets(int *argc, char **argv)
 	for (net = strtok_r(nets, " ", &lasts); net != NULL;
 	    net = strtok_r(NULL, " ", &lasts)) {
 		int pcifn;
-		char *val;
 
 		/* zoneadmd is not careful about a trailing delimiter. */
 		if (net[0] == '\0') {
@@ -198,8 +217,7 @@ add_nets(int *argc, char **argv)
 		}
 
 		/* Allow at most one "primary" net */
-		val = get_zcfg_var("net", net, "primary");
-		if (val != NULL && strcmp(val, "true") == 0) {
+		if (is_env_true("net", net, "primary")) {
 			if (primary != NULL) {
 				(void) printf("Error: "
 				    "multiple primary nets: %s %s\n",
@@ -213,9 +231,8 @@ add_nets(int *argc, char **argv)
 			nextpcifn++;
 		}
 
-		/* XXX-mg handle non-virtio-viona? */
 		if (snprintf(slotconf, sizeof (slotconf),
-		    "%d:%d,virtio-net-viona,%s", pcislot, pcifn, net) >=
+		    "%d:%d,virtio-net-viona,%s", PCI_SLOT_NICS, pcifn, net) >=
 		    sizeof (slotconf)) {
 			(void) printf("Error: net '%s' too long\n", net);
 			return (-1);
@@ -238,8 +255,9 @@ add_lpc(int *argc, char **argv)
 	char *val;
 	char conf[MAXPATHLEN];
 
+	(void) snprintf(conf, sizeof (conf), "%d,lpc", PCI_SLOT_LPC);
 	if (add_arg(argc, argv, "-s") != 0 ||
-	    add_arg(argc, argv, "1,lpc") != 0) {
+	    add_arg(argc, argv, conf) != 0) {
 		return (-1);
 	}
 
@@ -380,7 +398,7 @@ main(int argc, char **argv)
 	char *zhargv[ZH_MAXARGS] = {
 		"zhyve",	/* Squats on argv[0] */
 		"-H",		/* vmexit on halt isns */
-		"-B", "1,product=SmartDC HVM",	/* XXX-mg should be dynamic */
+		"-B", "1,product=SmartDC HVM",
 		NULL };
 	int zhargc;
 	nvlist_t *nvl;
