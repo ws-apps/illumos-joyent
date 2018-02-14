@@ -22,7 +22,7 @@
  * Copyright (c) 2003, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2014 Nexenta Systems, Inc. All rights reserved.
  * Copyright 2014 Igor Kozhukhov <ikozhukhov@gmail.com>.
- * Copyright 2017, Joyent, Inc.
+ * Copyright 2018, Joyent, Inc.
  */
 
 #ifndef _SYS_ZONE_H
@@ -124,6 +124,8 @@ extern "C" {
 #define	ZONE_ATTR_APP_SVC_CT	23
 #define	ZONE_ATTR_SCHED_FIXEDHI	24
 #define	ZONE_ATTR_SECFLAGS	25
+#define	ZONE_ATTR_INITRESTART0	26
+#define	ZONE_ATTR_INITREBOOT	27
 
 /* Start of the brand-specific attribute namespace */
 #define	ZONE_ATTR_BRAND_ATTRS	32768
@@ -613,6 +615,7 @@ typedef struct zone {
 
 	boolean_t	zone_restart_init;	/* Restart init if it dies? */
 	boolean_t	zone_reboot_on_init_exit; /* Reboot if init dies? */
+	boolean_t	zone_restart_init_0;	/* Restart only if it exits 0 */
 	boolean_t	zone_setup_app_contract; /* setup contract? */
 	struct brand	*zone_brand;		/* zone's brand */
 	void 		*zone_brand_data;	/* store brand specific data */
