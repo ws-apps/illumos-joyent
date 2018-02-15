@@ -13,6 +13,7 @@
 
 PROG =		bhyve
 SHAREFILES =	BHYVE_UEFI.fd BHYVE_UEFI_CSM.fd
+ZHYVE =		$(ROOT)/usr/lib/brand/bhyve/zhyve
 
 USRSHAREDIR =		$(ROOT)/usr/share/bhyve
 
@@ -37,8 +38,8 @@ all clean clobber lint:	$(SUBDIRS)
 install: $(SUBDIRS) $(USRSHAREFILES)
 	$(RM) $(ROOTUSRSBINPROG)
 	$(LN) $(ISAEXEC) $(ROOTUSRSBINPROG)
-	$(RM) $(BRAND_ZHYVE)
-	$(LN) $(ROOTUSRSBIN64)/$(PROG) $(BRAND_ZHYVE)
+	$(RM) $(ZHYVE)
+	$(LN) $(ROOTUSRSBIN64)/$(PROG) $(ZHYVE)
 
 $(USRSHAREDIR)/%: %
 	$(INS.file)
