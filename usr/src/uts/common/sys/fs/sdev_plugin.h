@@ -10,7 +10,7 @@
  */
 
 /*
- * Copyright (c) 2014 Joyent, Inc.  All rights reserved.
+ * Copyright (c) 2018, Joyent, Inc.
  */
 
 #ifndef _SYS_SDEV_PLUGIN_H
@@ -90,7 +90,6 @@ extern const char *sdev_ctx_name(sdev_ctx_t);
 extern const char *sdev_ctx_path(sdev_ctx_t);
 extern int sdev_ctx_minor(sdev_ctx_t, minor_t *);
 extern enum vtype sdev_ctx_vtype(sdev_ctx_t);
-extern const void *sdev_ctx_vtype_data(sdev_ctx_t);
 
 /*
  * Callbacks to manipulate nodes
