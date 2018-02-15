@@ -25,7 +25,7 @@
  */
 
 /*
- * Copyright (c) 2017, Joyent, Inc.
+ * Copyright (c) 2018, Joyent, Inc.
  * Copyright (c) 2015 by Delphix. All rights reserved.
  */
 
@@ -2265,30 +2265,42 @@ _umem_free_align(void *buf, size_t size)
 	vmem_xfree(umem_memalign_arena, buf, size);
 }
 
-#pragma weak umem_calloc = _umem_calloc
+/* This is sqrt(SIZE_MAX + 1) */
+#define	MUL_NO_OVERFLOW ((size_t)1 << (sizeof (size_t) * 4))
+
+/*
+ * This is intended to look like the newer GCC / clang __builtin_umul_overflow
+ * intrinsics to facilitate using them in lieu of this function.
+ */
+static boolean_t
+mul_overflow(size_t nelem, size_t elsize, size_t *totalp)
+{
+	*totalp = nelem * elsize;
+
+	if ((nelem >= MUL_NO_OVERFLOW || elsize >= MUL_NO_OVERFLOW) &&
+	    nelem > 0 && SIZE_MAX / nelem < elsize)
+		return (B_TRUE);
+
+	return (B_FALSE);
+}
+
 void *
-_umem_calloc(size_t nelem, size_t elsize, int umflag)
+umem_calloc(size_t nelem, size_t elsize, int umflag)
 {
 	size_t total;
 
 	if (nelem == 0 || elsize == 0) {
 		total = 0;
-	} else {
-		total = nelem * elsize;
-
-		/* check for overflow */
-		if (total / nelem != elsize) {
-			errno = ENOMEM; /* Follow what calloc(3C) does */
-			return (NULL);
-		}
+	} else if (mul_overflow(nelem, elsize, &total)) {
+		errno = ENOMEM; /* Follow what calloc(3C) does */
+		return (NULL);
 	}
 
 	return (_umem_zalloc(total, umflag));
 }
 
-#pragma weak umem_realloc = _umem_realloc
 void *
-_umem_realloc(void *ptr, size_t oldsize, size_t newsize, int umflag)
+umem_realloc(void *ptr, size_t oldsize, size_t newsize, int umflag)
 {
 	void *newptr;
 
@@ -2299,31 +2311,31 @@ _umem_realloc(void *ptr, size_t oldsize, size_t newsize, int umflag)
 		return (NULL);
 
 	(void) memcpy(newptr, ptr, MIN(oldsize, newsize));
-	explicit_bzero(ptr, oldsize);
-	_umem_free(ptr, oldsize);
+
+	if (umflag & UMEM_EXCISE)
+		umem_excise(ptr, oldsize);
+	else
+		_umem_free(ptr, oldsize);
 
 	return (newptr);
 }
 
-#pragma weak umem_reallocarray = _umem_reallocarray
 void *
-_umem_reallocarray(void *ptr, size_t oldnelem, size_t nelem, size_t elsize,
+umem_reallocarray(void *ptr, size_t oldnelem, size_t nelem, size_t elsize,
     int umflag)
 {
 	void *newptr;
 	size_t newtotal, oldtotal;
 
 	if (ptr == NULL)
-		return (_umem_calloc(nelem, elsize, umflag));
+		return (umem_calloc(nelem, elsize, umflag));
 
-	newtotal = nelem * elsize;
-	if (newtotal / nelem != elsize) {
+	if (mul_overflow(nelem, elsize, &newtotal)) {
 			errno = ENOMEM;
 			return (NULL);
 	}
 
-	oldtotal = oldnelem * elsize;
-	if (oldtotal / nelem != elsize) {
+	if (mul_overflow(oldnelem, elsize, &oldtotal)) {
 		errno = EINVAL;
 		return (NULL);
 	}
@@ -2332,17 +2344,35 @@ _umem_reallocarray(void *ptr, size_t oldnelem, size_t nelem, size_t elsize,
 		return (NULL);
 
 	(void) memcpy(newptr, ptr, MIN(oldtotal, newtotal));
-	explicit_bzero(ptr, oldtotal);
-	_umem_free(ptr, oldtotal);
+
+	if (umflag & UMEM_EXCISE)
+		umem_excise(ptr, oldtotal);
+	else
+		_umem_free(ptr, oldtotal);
 
 	return (newptr);
 }
 
-#pragma weak umem_cfree = _umem_cfree
 void
-_umem_cfree(void *ptr, size_t nelem, size_t elsize)
+umem_cfree(void *ptr, size_t nelem, size_t elsize)
 {
 	_umem_free(ptr, nelem * elsize);
+}
+
+void
+umem_excise(void *ptr, size_t size)
+{
+	explicit_bzero(ptr, size);
+	_umem_free(ptr, size);
+}
+
+void
+umem_cexcise(void *ptr, size_t nelem, size_t elsize)
+{
+	size_t total = nelem * elsize;
+
+	explicit_bzero(ptr, total);
+	umem_free(ptr, total);
 }
 
 static void *
