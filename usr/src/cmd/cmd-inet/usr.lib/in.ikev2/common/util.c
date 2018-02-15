@@ -133,6 +133,20 @@ port_source_str(ushort_t src)
 }
 #undef STR
 
+const char *
+pfkey_op_str(uint8_t op)
+{
+	const char *str = sadb_op_str(op);
+	return ((str != NULL) ? str : enum_printf("%hhu", op));
+}
+
+const char *
+pfkey_satype_str(uint8_t satype)
+{
+	const char *str = sadb_satype_str(op);
+	return ((str != NULL) ? str : enum_printf("%hhu", satype));
+}
+
 int
 ss_bunyan(const struct sockaddr *sa)
 {
