@@ -22,6 +22,7 @@
  * Copyright (c) 1986, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2015, Josef 'Jeff' Sipek <jeffpc@josefsipek.net>
  * Copyright (c) 2015, 2016 by Delphix. All rights reserved.
+ * Copyright (c) 2018 Joyent, Inc.
  */
 
 /*	Copyright (c) 1983, 1984, 1985, 1986, 1987, 1988, 1989  AT&T	*/
@@ -445,6 +446,13 @@ set_max_page_get(pgcnt_t target_total_pages)
 {
 	max_page_get = target_total_pages / 2;
 }
+
+pgcnt_t
+get_max_page_get()
+{
+	return (max_page_get);
+}
+
 
 static pgcnt_t pending_delete;
 

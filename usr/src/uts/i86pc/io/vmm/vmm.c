@@ -252,6 +252,9 @@ typedef struct vm_ioport_hook {
 	vmm_rmem_cb_t	vmih_rmem_cb;
 	vmm_wmem_cb_t	vmih_wmem_cb;
 } vm_ioport_hook_t;
+
+/* From uts/common/vm/vm_page.c */
+extern pgcnt_t get_max_page_get();
 #endif /* __FreeBSD__ */
 
 #ifdef KTR
@@ -671,6 +674,15 @@ vm_alloc_memseg(struct vm *vm, int ident, size_t len, bool sysmem)
 
 	if (len == 0 || (len & PAGE_MASK))
 		return (EINVAL);
+
+#ifndef __FreeBSD__
+	/*
+	 * An attempted allocation >= max_page_get will hang forever in
+	 * page_create_va.
+	 */
+	if (btop(len) >= get_max_page_get())
+		return (ENOMEM);
+#endif
 
 	seg = &vm->mem_segs[ident];
 	if (seg->object != NULL) {
