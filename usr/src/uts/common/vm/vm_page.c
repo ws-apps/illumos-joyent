@@ -441,10 +441,20 @@ init_pages_pp_maximum()
 	}
 }
 
+/*
+ * In the past, we limited the maximum pages that could be gotten to essentially
+ * 1/2 of the total pages on the system. However, this is too conservative for
+ * some cases. For example, if we want to host a large virtual machine which
+ * needs to use a significant portion of the system's memory. In practice,
+ * allowing more than 1/2 of the total pages is fine, but becomes problematic
+ * as we approach or exceed 75% of the pages on the system. Thus, we limit the
+ * maximum to 23/32 of the total pages, which is ~72%.
+ */
 void
 set_max_page_get(pgcnt_t target_total_pages)
 {
-	max_page_get = target_total_pages / 2;
+	ASSERT3U(target_total_pages, >, 0x10);
+	max_page_get = (target_total_pages >> 5) * 23;
 }
 
 pgcnt_t
