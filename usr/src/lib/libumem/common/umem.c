@@ -2303,6 +2303,10 @@ void *
 umem_realloc(void *ptr, size_t oldsize, size_t newsize, int umflag)
 {
 	void *newptr;
+	boolean_t excise = (umflag & UMEM_EXCISE) ? B_TRUE : B_FALSE;
+
+	/* Don't pass UMEM_EXCISE to any *alloc function */
+	umflag &= ~(UMEM_EXCISE);
 
 	if (ptr == NULL)
 		return (_umem_alloc(newsize, umflag));
@@ -2312,7 +2316,7 @@ umem_realloc(void *ptr, size_t oldsize, size_t newsize, int umflag)
 
 	(void) memcpy(newptr, ptr, MIN(oldsize, newsize));
 
-	if (umflag & UMEM_EXCISE)
+	if (excise)
 		umem_excise(ptr, oldsize);
 	else
 		_umem_free(ptr, oldsize);
@@ -2326,6 +2330,9 @@ umem_reallocarray(void *ptr, size_t oldnelem, size_t nelem, size_t elsize,
 {
 	void *newptr;
 	size_t newtotal, oldtotal;
+	boolean_t excise = (umflag & UMEM_EXCISE) ? B_TRUE : B_FALSE;
+
+	umflag &= ~(UMEM_EXCISE);
 
 	if (ptr == NULL)
 		return (umem_calloc(nelem, elsize, umflag));
@@ -2345,7 +2352,7 @@ umem_reallocarray(void *ptr, size_t oldnelem, size_t nelem, size_t elsize,
 
 	(void) memcpy(newptr, ptr, MIN(oldtotal, newtotal));
 
-	if (umflag & UMEM_EXCISE)
+	if (excise)
 		umem_excise(ptr, oldtotal);
 	else
 		_umem_free(ptr, oldtotal);
